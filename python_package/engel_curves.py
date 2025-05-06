@@ -532,7 +532,8 @@ def identify_non_crossings(dataframe,p0_or_p1,amt_to_add=0.0001):
         else:
             return dataframe['logP1_ranked']
 
-def plot_bars(dataframe, prcnt_chng_P1, prcnt_chng_P0, title, deciles_only=True, drop_ends_dist=True, percentile='percentile', filename=None):
+def plot_bars(dataframe, prcnt_chng_P1, prcnt_chng_P0, title, deciles_only=True, drop_ends_dist=True, percentile='percentile', 
+            limit_y_axis = True, y_min=100, y_max=275, y_step_tick=25,filename=None):
     # Create figure and axis
     fig, ax = plt.subplots(figsize=(6,10))
 
@@ -542,7 +543,7 @@ def plot_bars(dataframe, prcnt_chng_P1, prcnt_chng_P0, title, deciles_only=True,
         ### Filtering data to only deciles
         dataframe = dataframe[dataframe['mod_dec'] == 0]
         ### Dropping temporary column
-        dataframe.drop('mod_dec', axis=1, inplace=True)
+        dataframe = dataframe.drop(columns='mod_dec')
 
     if drop_ends_dist:
         dataframe = dataframe[(dataframe['decile'] != 0) & (dataframe['decile'] != 100)]
@@ -557,8 +558,9 @@ def plot_bars(dataframe, prcnt_chng_P1, prcnt_chng_P0, title, deciles_only=True,
     ax.set_title(title, fontsize='medium')
     ax.legend(bbox_to_anchor=(0.5, -0.125), loc='lower center', ncol=2)
     ax.set_xticks(range(10, 91, 10))
-    ax.set_ylim([100,280])
-    ax.set_yticks(range(100, 275, 25))
+    if limit_y_axis:
+        ax.set_ylim([y_min,y_max])
+        ax.set_yticks(range(y_min, y_max, y_step_tick))
     ### Save plot
     if filename is not None:
         plt.savefig(filename, bbox_inches = "tight")

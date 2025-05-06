@@ -6,17 +6,18 @@ global username = c(username)
 global dropbox "/home/${username}/Dropbox/Projects/"
 cd "$dropbox/Engel_Ado"
 
-
 *** Directories ***
 local data_dir      = "data\"
 local output_dir    = "output\"
 local temp_dir      = "`output_dir'temp\"
+local plot_dir      = "`output_dir'plots\"
 
  *** Inputs ***
 local price_indices = "`output_dir'price_indices"
 
 *** Outputs ***
-local est_comp      = "`temp_dir'est_comparision_original"
+local wf_est_wtmean = "`plot_dir'wf_wtmean_linear.pdf"
+local wf_est_sc     = "`plot_dir'wf_sc_linear.pdf"
 
 *** Parameters ***
 *** So that the variables can be called different things in different datasets
@@ -64,14 +65,14 @@ foreach var of varlist logP0_byprcnt logP1_byprcnt logP0_sc_byprcnt logP1_sc_byp
 drop log*
 
 twoway bar prcnt_chng_P1_byprcnt prcnt_chng_P0_byprcnt decile, ///
-xlabel(10(10)90) ylabel(100(20)180) xtitle("Decile of Income Distribution", size(medlarge)) ytitle("") ///
+xlabel(10(10)90) ylabel(40(10)100) xtitle("Decile of Income Distribution", size(medlarge)) ytitle("") ///
 barwidth(8 8 8 8) fcolor(eltblue%50 erose%50 none none  ) lcolor(eltblue erose edkblue maroon) lwidth(none   none medium medium) graphregion(lcolor(white) fcolor(white)) ///
 note("") title("No correction applied for missing medians",size(medium)) legend(col(2) label(1 "P1") label(2 "P0") symxsize(*.5)  colgap(*.5)  keygap(*.7) )
-graph export myestimates.pdf, replace
+graph "`wf_est_wtmean'", replace
 
 
 twoway bar prcnt_chng_P1_sc_byprcnt prcnt_chng_P0_sc_byprcnt decile, ///
-xlabel(10(10)90) ylabel(100(20)180) xtitle("Decile of Income Distribution", size(medlarge)) ytitle("") ///
+xlabel(10(10)90) ylabel(40(10)100) xtitle("Decile of Income Distribution", size(medlarge)) ytitle("") ///
 barwidth(8 8 8 8) fcolor(eltblue%50 erose%50 none none  ) lcolor(eltblue erose edkblue maroon) lwidth(none   none medium medium) graphregion(lcolor(white) fcolor(white)) ///
 note("") title("Sarhan uniformity correction applied", size(medium)) legend(col(2) label(1 "P1") label(2 "P0") symxsize(*.5)  colgap(*.5)  keygap(*.7) )
-graph export myestimates_sc.pdf, replace
+graph "`wf_est_sc'", replace

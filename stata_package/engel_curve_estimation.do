@@ -34,8 +34,8 @@ local market_id      = "market_id"
 local period_id      = "period_id"
 local good_id        = "i_good"
 local group_id       = "G_group"
-local period_0       = 43
-local period_1       = 55
+local period_0       = 1
+local period_1       = 2
 *** Assumes hh_id is unique across markets but not necessarily periods -- user should check this
 local hh_id          = "hh_id"
 local hh_wt          = "wt"
