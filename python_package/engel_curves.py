@@ -219,21 +219,31 @@ def dataframe_to_dict(dataframe, period_id, market_id, good_id, period_0, period
 def weighted_median(dataframe, val, weight, dropna=True):
     """
     weighted_median computes the weighted median of a data series.
-    
+
     :dataframe: a pandas dataframe
     :val:       the value in question to take the weighted median of
     :weight:    the weights to use for the median
     :dropna:    whether to take the median of a list that only includes non-NAs
     """
-    
-    data_sorted = dataframe.sort_values(val)
     if dropna:
-        data_sorted = data_sorted[~data_sorted[val].isna()]
-    data_sorted['cumsum'] = data_sorted[weight].cumsum()
-    cutoff = data_sorted[weight].sum() / 2.0
-    data_sorted['dist_to_med'] = np.abs(data_sorted['cumsum']-cutoff)
-    ### This could be multi valued, if so average together observations
-    return data_sorted[data_sorted['dist_to_med'] == data_sorted['dist_to_med'].min()][val].mean()
+        mask    = dataframe[val].notna()
+        values  = dataframe.loc[mask, val].to_numpy()
+        weights = dataframe.loc[mask, weight].to_numpy()
+    else:
+        values  = dataframe[val].to_numpy()
+        weights = dataframe[weight].to_numpy()
+
+    if len(values) == 0:
+        return np.nan
+
+    order   = np.argsort(values)
+    values  = values[order]
+    weights = weights[order]
+
+    cumw    = np.cumsum(weights)
+    cutoff  = cumw[-1] / 2.0
+    idx     = np.searchsorted(cumw, cutoff)
+    return float(values[idx])
 
 def gen_comparision_df(smoothed_inc_dict,smoothed_exp_dict,smoothed_df, evl_grid, evl_points, period_id, market_id, good_id, group_id, period_0, period_1):
     smoothed_inc_df = dict_to_df(smoothed_inc_dict,[market_id,period_id],'log_smoothed_outlays', evl_grid, evl_points)
