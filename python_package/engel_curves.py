@@ -253,6 +253,160 @@ def apply_exact_price_correction(smoothed_exp, d_price_dict, group_dict,
     return adjusted
 
 
+def apply_first_order_price_correction(
+    smoothed_exp,      # dict: (mkt, prd, gd) → array of budget shares at eval points
+    smoothed_inc,      # dict: (mkt, prd) → array of log smoothed outlays at eval points
+    d_price_dict,      # dict: (mkt, gd) → Δlog price (period 0 → period 1)
+    group_dict,        # dict: gd → group
+    sigma,             # float: elasticity of substitution
+    period_0,          # identifier for period 0
+    period_1,          # identifier for period 1
+    monotonicity_dict  # dict: (mkt, prd, gd) → +1/-1/None
+):
+    """
+    First-order price correction (AFFG Equation 8).
+
+    Computes per-good bias corrections for P0 and P1 price indices:
+        bias = (beta^0)^{-1} * sigma * (d_ln_p - d_ln_p_bar_G)
+
+    where (beta^0)^{-1} = d(log y)/d(w) is the slope of the inverse Engel
+    curve, and d_ln_p_bar_G is the simple equal-weighted average price change
+    within group G.
+
+    Returns (bias0_dict, bias1_dict) where each is keyed by (mkt, gd) → array
+    of bias values at each percentile.
+    """
+    def _compute_slopes(w, log_y):
+        """Compute slopes d(log_y)/d(w) at each evaluation point.
+
+        Uses the adjacent-percentile difference with smaller absolute value,
+        sets missing where the two sides disagree in sign, then smooths with
+        a 3-point average — mirroring the Stata implementation.
+        """
+        n = len(w)
+        slope = np.full(n, np.nan)
+
+        dw   = np.diff(w)
+        dlog = np.diff(log_y)
+
+        # Avoid division by zero
+        with np.errstate(divide='ignore', invalid='ignore'):
+            slope_below = np.full(n, np.nan)
+            slope_above = np.full(n, np.nan)
+            # slope_below[i] = (log_y[i] - log_y[i-1]) / (w[i] - w[i-1])
+            slope_below[1:] = dlog / dw
+            # slope_above[i] = (log_y[i+1] - log_y[i]) / (w[i+1] - w[i])
+            slope_above[:-1] = dlog / dw
+
+        # Pick the one with smaller absolute value
+        abs_below = np.abs(slope_below)
+        abs_above = np.abs(slope_above)
+
+        use_above = abs_above <= abs_below
+        use_below = abs_below < abs_above
+        # Handle NaNs: if one side is NaN, use the other
+        use_above = use_above | np.isnan(slope_below)
+        use_below = use_below | np.isnan(slope_above)
+
+        slope = np.where(use_above, slope_above, slope)
+        slope = np.where(use_below & ~use_above, slope_below, slope)
+        # Where both exist: pick the one already set; also handle both NaN
+        slope = np.where(use_above & use_below,
+                         np.where(abs_above <= abs_below, slope_above, slope_below),
+                         slope)
+
+        # Set missing where the two sides disagree in sign
+        both_exist = ~np.isnan(slope_below) & ~np.isnan(slope_above)
+        sign_disagree = (slope_below * slope_above) < 0
+        slope[both_exist & sign_disagree] = np.nan
+
+        # 3-point smoothing
+        smooth = np.full(n, np.nan)
+        for i in range(n):
+            vals = []
+            if i > 0 and not np.isnan(slope[i-1]):
+                vals.append(slope[i-1])
+            if not np.isnan(slope[i]):
+                vals.append(slope[i])
+            if i < n-1 and not np.isnan(slope[i+1]):
+                vals.append(slope[i+1])
+            if vals:
+                smooth[i] = np.mean(vals)
+
+        return smooth
+
+    bias0_dict = {}
+    bias1_dict = {}
+
+    # Collect all (mkt, gd) pairs that exist in both periods with price data
+    mkt_gd_pairs = set()
+    for key in smoothed_exp:
+        mkt, prd, gd = key
+        if (mkt, gd) in d_price_dict:
+            other_prd = period_1 if prd == period_0 else period_0
+            if (mkt, other_prd, gd) in smoothed_exp:
+                mkt_gd_pairs.add((mkt, gd))
+
+    # Compute slopes for each (mkt, prd, gd)
+    slopes = {}
+    for mkt, gd in mkt_gd_pairs:
+        for prd in [period_0, period_1]:
+            key = (mkt, prd, gd)
+            if key not in smoothed_exp:
+                continue
+            w     = smoothed_exp[key]
+            log_y = smoothed_inc.get((mkt, prd))
+            if log_y is None:
+                continue
+            # Only compute for monotonic curves
+            mon = monotonicity_dict.get(key)
+            if mon is None or mon == 0:
+                continue
+            slopes[key] = _compute_slopes(w, log_y)
+
+    # Group the (mkt, gd) pairs by (mkt, group)
+    mkt_group_goods = {}
+    for mkt, gd in mkt_gd_pairs:
+        grp = group_dict[gd]
+        mg_key = (mkt, grp)
+        if mg_key not in mkt_group_goods:
+            mkt_group_goods[mg_key] = []
+        mkt_group_goods[mg_key].append(gd)
+
+    # Compute simple equal-weighted group-average price changes
+    dp_avg = {}  # (mkt, grp) → average dp (in period 0→1 direction)
+    for (mkt, grp), goods in mkt_group_goods.items():
+        dps = [d_price_dict[(mkt, gd)] for gd in goods if (mkt, gd) in d_price_dict]
+        if dps:
+            dp_avg[(mkt, grp)] = np.mean(dps)
+
+    # Compute per-good bias
+    for mkt, gd in mkt_gd_pairs:
+        grp     = group_dict[gd]
+        dp      = d_price_dict[(mkt, gd)]
+        dp_bar  = dp_avg.get((mkt, grp), 0.0)
+
+        # Bias for P0: uses period-0 slopes and +dp direction
+        key0 = (mkt, period_0, gd)
+        if key0 in slopes:
+            bias0_dict[(mkt, gd)] = slopes[key0] * sigma * (dp - dp_bar)
+        else:
+            n_pts = len(smoothed_exp.get(key0, []))
+            if n_pts > 0:
+                bias0_dict[(mkt, gd)] = np.full(n_pts, np.nan)
+
+        # Bias for P1: uses period-1 slopes and -dp direction
+        key1 = (mkt, period_1, gd)
+        if key1 in slopes:
+            bias1_dict[(mkt, gd)] = slopes[key1] * sigma * (-dp - (-dp_bar))
+        else:
+            n_pts = len(smoothed_exp.get(key1, []))
+            if n_pts > 0:
+                bias1_dict[(mkt, gd)] = np.full(n_pts, np.nan)
+
+    return bias0_dict, bias1_dict
+
+
 def dict_to_df(input_dict,column_list,new_col_name, evl_grid, evl_points):
     dict_df         = pd.DataFrame(input_dict).T.reset_index()
     dict_df.columns = column_list+['prcntile'+str(int(np.round(a*evl_points))) for a in evl_grid]

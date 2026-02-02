@@ -167,37 +167,32 @@ if "`first_order_price_corr'" == "Y" {
 	replace smooth_slope=(slope[_n+1]+slope)/2 if mkt_good_prd==mkt_good_prd[_n+1] & smooth_slope ==.
 	replace smooth_slope=slope if  smooth_slope==.
 	
-	gen inv_slope = 1/smooth_slope
-	
 	*** Generate slopes only for monotonic curves
 	keep if curve_mon != 0
-	
+
 	*** Convert period ids to 0 or 1
 	qui replace `period_id' = 0 if `period_id' == `period_0'
 	qui replace `period_id' = 1 if `period_id' == `period_1'
 	qui drop if `period_id' != 0 & `period_id' != 1
-	
-	*** Jay's note 05/20/2024: I don't really understand the extrapolated slopes
-	*** Or the nP4355lp_wbwg25cen_rshare variable
-	
+
 	*** Merge with prices
-	merge m:1 `market_id' `good_id'  using  "`price_data'", keep(3) nogen keepusing(`market_id' `good_id' `d_price_var') 
-	*** Jay's note 05/20/2024: Should also include d_prc_p0p1, but not available
-	gen d_ln_p = `d_price_var'
-	replace d_ln_p = -1*`d_price_var'  if `period_id' == 0
-// 	gen d_ln_p = `d_price_var' if `period_id' == 1
-// 	replace d_ln_p = `d_prc_p0p1' if `period_id' == 0
-	
-	egen tot_exp_shares = total(smoothed_exp_share_g), by(`market_id' `period_id' prcntile `group_id')
-	egen aux_all_eshares = total(smoothed_exp_share_g * d_ln_p), by(`market_id' `period_id' prcntile `group_id')
-	gen P_av_all = aux_all_eshares/tot_exp_shares
-	
-	*Need to count how many goods by market and decile we have:
-	gen one_r=1 if inv_slope !=.
-	egen count_goods_r =total(one_r), by(`market_id' `period_id' prcntile)
-	drop if count_goods_r <=2
-	
-	gen bias_bygood_full = - smoothed_exp_share_g * (d_ln_p - P_av_all) * inv_slope
+	merge m:1 `market_id' `good_id'  using  "`price_data'", keep(3) nogen keepusing(`market_id' `good_id' `d_price_var')
+	*** For P0 (period 0→1): use +d_price_var; for P1 (period 1→0): use -d_price_var
+	gen d_ln_p = `d_price_var' if `period_id' == 0
+	replace d_ln_p = -1*`d_price_var' if `period_id' == 1
+
+	*** Count goods with valid slopes per group (simple equal-weighted average)
+	gen one_r = 1 if smooth_slope != .
+	egen count_goods_r = total(one_r), by(`market_id' `period_id' prcntile `group_id')
+	drop if count_goods_r <= 2
+
+	*** Simple equal-weighted average of d_ln_p within group
+	egen sum_d_ln_p = total(d_ln_p), by(`market_id' `period_id' prcntile `group_id')
+	gen P_av_all = sum_d_ln_p / count_goods_r
+
+	*** AFFG Equation 8: bias = (beta^0)^{-1} * sigma * (d_ln_p - d_ln_p_bar)
+	*** smooth_slope = d(log_y)/d(w) = (beta)^{-1}
+	gen bias_bygood_full = smooth_slope * `sigma' * (d_ln_p - P_av_all)
 	keep bias_bygood_full `market_id' `group_id' `good_id' `period_id' prcntile
 	
 	qui reshape wide bias_bygood_full*, i(`market_id' `good_id' `group_id' prcntile) j(`period_id')
