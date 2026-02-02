@@ -151,7 +151,6 @@ else {
 
 if "`first_order_price_corr'" == "Y" {
 	preserve
-	*** Jay's q: adjustment is the same for panel or not?
 	sort mkt_good_prd prcntile
 	qui gen slope_below  =  (log_smoothed_outlays - log_smoothed_outlays[_n-1])/( smoothed_exp_share_g - smoothed_exp_share_g[_n-1])
 	qui replace slope_below = . if mkt_good_prd != mkt_good_prd[_n-1]
@@ -160,7 +159,7 @@ if "`first_order_price_corr'" == "Y" {
 	qui gen slope = slope_above if abs(slope_above) <=  abs(slope_below)
 	qui replace slope = slope_below if abs(slope_below) <  abs(slope_above)
 	qui replace slope = . if slope_below * slope_above < 0
-// 	drop slope_below slope_above
+	drop slope_below slope_above
 	*** Smoothing slopes
 	gen smooth_slope =(slope[_n-1]+slope+slope[_n+1])/3 if mkt_good_prd==mkt_good_prd[_n-1] & mkt_good_prd==mkt_good_prd[_n+1]  & mkt_good_prd!=.
 	replace smooth_slope =(slope[_n-1]+slope)/2 if mkt_good_prd==mkt_good_prd[_n-1] & smooth_slope==.

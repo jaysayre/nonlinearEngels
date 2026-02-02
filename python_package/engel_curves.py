@@ -298,22 +298,17 @@ def apply_first_order_price_correction(
             # slope_above[i] = (log_y[i+1] - log_y[i]) / (w[i+1] - w[i])
             slope_above[:-1] = dlog / dw
 
-        # Pick the one with smaller absolute value
+        # Pick the one with smaller absolute value; use the other if one is NaN
         abs_below = np.abs(slope_below)
         abs_above = np.abs(slope_above)
+        has_below = ~np.isnan(slope_below)
+        has_above = ~np.isnan(slope_above)
 
-        use_above = abs_above <= abs_below
-        use_below = abs_below < abs_above
-        # Handle NaNs: if one side is NaN, use the other
-        use_above = use_above | np.isnan(slope_below)
-        use_below = use_below | np.isnan(slope_above)
-
-        slope = np.where(use_above, slope_above, slope)
-        slope = np.where(use_below & ~use_above, slope_below, slope)
-        # Where both exist: pick the one already set; also handle both NaN
-        slope = np.where(use_above & use_below,
-                         np.where(abs_above <= abs_below, slope_above, slope_below),
-                         slope)
+        slope = np.full(n, np.nan)
+        slope = np.where(has_above & (~has_below | (abs_above <= abs_below)),
+                         slope_above, slope)
+        slope = np.where(has_below & (~has_above | (abs_below < abs_above)),
+                         slope_below, slope)
 
         # Set missing where the two sides disagree in sign
         both_exist = ~np.isnan(slope_below) & ~np.isnan(slope_above)
@@ -398,7 +393,7 @@ def apply_first_order_price_correction(
         # Bias for P1: uses period-1 slopes and -dp direction
         key1 = (mkt, period_1, gd)
         if key1 in slopes:
-            bias1_dict[(mkt, gd)] = slopes[key1] * sigma * (-dp - (-dp_bar))
+            bias1_dict[(mkt, gd)] = slopes[key1] * sigma * -(dp - dp_bar)
         else:
             n_pts = len(smoothed_exp.get(key1, []))
             if n_pts > 0:
