@@ -1,5 +1,5 @@
 # nonlinearEngelcurves
-Code (currently codes are available for both Python and Stata, R coming soon) to apply the price index and welfare estimation procedure in Atkin, Faber, Fally and Gonzalez-Navarro (2023).
+Code (available for Python, Stata, and R) to apply the price index and welfare estimation procedure in Atkin, Faber, Fally and Gonzalez-Navarro (2023).
 
 ### Inputs
 Requires household consumption data that contain expenditures for households on goods $g$ organized into groups $G$. Household consumption data can either be a repeated cross section or panel. Households are ranked according to total expenditure per capita within a given market identifier. 
@@ -7,10 +7,12 @@ Requires household consumption data that contain expenditures for households on 
 ### Outputs
 Smoothed relative Engel curves, as well as a dataset containing price indices and welfare changes.
 
-### Usage 
+### Usage
 Python: Run engel_curve_estimation.ipynb to produce engel curves, compute welfare metrics, and plot them.
 
-Stata: Run engel_curve_estimation.do first to produce engel curve, then  welfare_estimation.do for welfare metrics, and finally plot_welfare_indices.do for plots. Alternately, simply run do run_all.do. 
+R: Run engel_curve_estimation.R from the R_package directory. It sources engel_curves.R (function library) and produces engel curves, welfare metrics, and plots. Supports exact price correction (AFFG Proposition 1) and first-order price correction (AFFG Equation 8).
+
+Stata: Run engel_curve_estimation.do first to produce engel curve, then  welfare_estimation.do for welfare metrics, and finally plot_welfare_indices.do for plots. Alternately, simply run do run_all.do.
 
 ### Example
 This code is set up to estimate Engel curves and compute welfare metrics for an artificial data set I provide here. This artifical example
