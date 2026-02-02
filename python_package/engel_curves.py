@@ -18,8 +18,8 @@ import matplotlib.pyplot as plt
 ### Programs
 def epanechnikov(t):
     res = np.zeros_like(t)
-    ind = np.where(np.abs(t)<=1)
-    res[ind] = 0.75*(1-t[ind]**2)
+    ind = np.where(np.abs(t) <= np.sqrt(5))
+    res[ind] = 3.0/(4.0*np.sqrt(5)) * (1 - t[ind]**2/5.0)
     return res
 
 def lpoly(x, y, x0, bwidth, dataframe, aweights=None, kernel=epanechnikov):
@@ -31,7 +31,7 @@ def lpoly(x, y, x0, bwidth, dataframe, aweights=None, kernel=epanechnikov):
 
     y0 = np.zeros_like(x0)
     for i, xi in enumerate(x0):
-        weights = kernel(np.abs(x-xi)/(bwidth*2.0))
+        weights = kernel(np.abs(x-xi)/bwidth)
 
         # Filter out the datapoints with zero weights.
         inds = np.where(np.abs(weights)>1e-10)[0]
