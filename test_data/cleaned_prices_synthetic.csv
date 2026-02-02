@@ -1,0 +1,43 @@
+market_id,i_good,dp_prd1_prd0
+0,Cow meat,0.149014
+0,Cow milk,-0.041479
+0,Fish,0.194307
+0,Pig meat,0.456909
+0,Poultry,-0.070246
+0,Poultry eggs,-0.070241
+0,Sheep and goat meat,0.473764
+1,Cow meat,0.23023
+1,Cow milk,-0.140842
+1,Fish,0.162768
+1,Pig meat,-0.139025
+1,Poultry,-0.139719
+1,Poultry eggs,0.072589
+1,Sheep and goat meat,-0.573984
+2,Cow meat,-0.517475
+2,Cow milk,-0.168686
+2,Fish,-0.303849
+2,Pig meat,0.094274
+2,Poultry,-0.272407
+2,Poultry eggs,-0.423691
+2,Sheep and goat meat,0.439695
+3,Cow meat,-0.067733
+3,Cow milk,0.020258
+3,Fish,-0.427424
+3,Pig meat,-0.163315
+3,Poultry,0.033277
+3,Poultry eggs,-0.345298
+3,Sheep and goat meat,0.112709
+4,Cow meat,-0.180192
+4,Cow milk,-0.087508
+4,Fish,-0.180512
+4,Pig meat,0.555683
+4,Poultry,-0.004049
+4,Poultry eggs,-0.317313
+4,Sheep and goat meat,0.246763
+5,Cow meat,-0.366253
+5,Cow milk,0.062659
+5,Fish,-0.587901
+5,Pig meat,-0.398456
+5,Poultry,0.059058
+5,Poultry eggs,0.22154
+5,Sheep and goat meat,0.05141

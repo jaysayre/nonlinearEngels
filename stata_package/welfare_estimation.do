@@ -125,7 +125,7 @@ if "`exact_price_correction'" == "Y" {
 	gen price_adj_smd_es_g       =  smoothed_exp_share_g*exp(-(`sigma'-1) * `d_price_var') if `period_id' == `period_0'
 	replace price_adj_smd_es_g   =  smoothed_exp_share_g*exp((`sigma'-1) * `d_price_var') if `period_id' == `period_1'
 	egen sum_price_grp           =  total(price_adj_smd_es_g), by(`market_id' `group_id' `period_id' prcntile)
-	replace smoothed_exp_share_g = smoothed_exp_share_g/sum_price_grp
+	replace smoothed_exp_share_g = price_adj_smd_es_g/sum_price_grp
 	drop price_adj_smd_es_g sum_price_grp `d_price_var'
 } 
 

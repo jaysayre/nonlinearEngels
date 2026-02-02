@@ -8,7 +8,7 @@
 # - Step 1: Estimate the engel curves, first by generating smoothed income for each market-period, and then by generating smoothed expenditures for each market-period-good
 # - Step 2: Estimate various measures of welfare
 
-import os, sys, getopt
+import os, sys, getopt, copy
 import pandas as pd
 import numpy as np
 from scipy import stats
@@ -189,6 +189,68 @@ def compute_percentage_overlap(start_list, min_x_share, max_x_share,evl_points):
         if min_x_share < a < max_x_share:
             count += 1
     return np.round(float(count)/(evl_points+1),6)
+
+
+def apply_exact_price_correction(smoothed_exp, d_price_dict, group_dict,
+                                  sigma, period_to_adjust, period_0, period_1):
+    """
+    Adjust one period's Engel curves for relative price changes (AFFG Proposition 1).
+
+    For P0 computation: adjust period 0 curves with exp(-(sigma-1) * dp)
+    For P1 computation: adjust period 1 curves with exp(+(sigma-1) * dp)
+
+    Returns a new dict with adjusted curves for the specified period,
+    original curves for the other period.
+
+    :smoothed_exp:      dict keyed by (mkt, prd, gd) -> array of smoothed expenditure shares
+    :d_price_dict:      dict keyed by (mkt, gd) -> delta log price between periods
+    :group_dict:        dict keyed by gd -> group
+    :sigma:             price elasticity parameter
+    :period_to_adjust:  which period's curves to adjust (period_0 or period_1)
+    :period_0:          identifier for period 0
+    :period_1:          identifier for period 1
+    """
+    adjusted = copy.deepcopy(smoothed_exp)
+
+    # Apply exponential adjustment to the specified period only
+    for key in adjusted.keys():
+        mkt, prd, gd = key
+        if prd != period_to_adjust:
+            continue
+        if (mkt, gd) not in d_price_dict:
+            continue
+        dp = d_price_dict[(mkt, gd)]
+        if prd == period_0:
+            adjusted[key] = adjusted[key] * np.exp(-(sigma - 1) * dp)
+        elif prd == period_1:
+            adjusted[key] = adjusted[key] * np.exp((sigma - 1) * dp)
+
+    # Renormalize within each (mkt, prd, group) at each percentile point
+    # First, compute group sums for the adjusted period
+    group_sums = {}
+    for key in adjusted.keys():
+        mkt, prd, gd = key
+        if prd != period_to_adjust:
+            continue
+        grp = group_dict[gd]
+        sum_key = (mkt, prd, grp)
+        if sum_key not in group_sums:
+            group_sums[sum_key] = np.zeros_like(adjusted[key])
+        group_sums[sum_key] = group_sums[sum_key] + adjusted[key]
+
+    # Divide each adjusted curve by its group sum
+    for key in adjusted.keys():
+        mkt, prd, gd = key
+        if prd != period_to_adjust:
+            continue
+        grp = group_dict[gd]
+        sum_key = (mkt, prd, grp)
+        denom = group_sums[sum_key]
+        # Avoid division by zero
+        with np.errstate(divide='ignore', invalid='ignore'):
+            adjusted[key] = np.where(denom != 0, adjusted[key] / denom, adjusted[key])
+
+    return adjusted
 
 
 def dict_to_df(input_dict,column_list,new_col_name, evl_grid, evl_points):
