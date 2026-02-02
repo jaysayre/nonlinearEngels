@@ -9,8 +9,6 @@
 ### Step 3: Generate plots for welfare measures
 
 ### Programs ###
-library(tidyverse)
-library(haven)
 source("engel_curves.R")
 
 ### Directories ###
@@ -22,6 +20,7 @@ plot_dir   <- file.path(output_dir, "plots")
 
 ### Inputs ###
 cons_data  <- file.path(data_dir, "lsms_test_data.dta")
+price_data <- file.path(data_dir, "cleaned_prices_synthetic.csv")
 
 ### Intermediates ###
 smth_x_shares_dta <- file.path(temp_dir, "smoothexp_shares_R.dta")
@@ -49,6 +48,8 @@ weight_medians                 <- TRUE
 sarhan_correction              <- TRUE
 panel                          <- FALSE
 round_to_decile                <- FALSE
+exact_price_correction         <- TRUE
+first_order_approx             <- FALSE
 
 ### Variable names
 market_id  <- "market_id"
@@ -62,6 +63,7 @@ hh_wt      <- "wt"
 outlays_var <- "exp_cap"
 exp_var     <- "expenditure"
 percentile_var <- "percentile"
+d_price_var    <- "dp_prd1_prd0"
 type_extrap_tails <- "linear"
 
 ###############################################################################
@@ -98,14 +100,18 @@ if (!read_engelcurves_frm_file) {
   }
 
   if (winsorize) {
+    # Match scipy.stats.mstats.winsorize(x, limits=0.001):
+    # clips floor(n*limits) observations at each end
     hh_exp_df <- hh_exp_df %>%
       group_by(across(all_of(c(market_id, period_id)))) %>%
       mutate(
-        lo = quantile(.data[[outlays_var]], 0.001),
-        hi = quantile(.data[[outlays_var]], 0.999),
+        n_obs = n(),
+        k_clip = as.integer(floor(n_obs * 0.001)),
+        lo = sort(.data[[outlays_var]])[k_clip + 1L],
+        hi = sort(.data[[outlays_var]])[n_obs - k_clip],
         !!outlays_var := pmax(pmin(.data[[outlays_var]], hi), lo)
       ) %>%
-      select(-lo, -hi) %>%
+      select(-n_obs, -k_clip, -lo, -hi) %>%
       ungroup()
   }
 
@@ -223,41 +229,130 @@ if (compute_welfare) {
     smoothed_exp <- dict_result$smoothed_exp_output
   }
 
-  message("=== Checking monotonicity ===")
-  monotonicity_dict <- list()
-  for (key in names(smoothed_exp)) {
-    smoothed_exp[[key]] <- monotonicity_tails(
-      smoothed_exp[[key]],
-      extrapolate_end     = extrapolate_tails,
-      evl_grid            = eval_grid,
-      evl_points          = evaluation_points,
-      type_extrapolation  = type_extrap_tails
-    )
-    if (delete_neg_exp_shares) {
-      smoothed_exp[[key]] <- replace_neg_exp_shares(smoothed_exp[[key]], evl_grid = eval_grid)
+  # Helper to run monotonicity + tails on a smoothed_exp dict
+  apply_monotonicity <- function(sexp) {
+    mon_dict <- list()
+    for (key in names(sexp)) {
+      sexp[[key]] <- monotonicity_tails(
+        sexp[[key]],
+        extrapolate_end    = extrapolate_tails,
+        evl_grid           = eval_grid,
+        evl_points         = evaluation_points,
+        type_extrapolation = type_extrap_tails
+      )
+      if (delete_neg_exp_shares) {
+        sexp[[key]] <- replace_neg_exp_shares(sexp[[key]], evl_grid = eval_grid)
+      }
+      mon_dict[[key]] <- monotonicity_check(sexp[[key]])
     }
-    monotonicity_dict[[key]] <- monotonicity_check(smoothed_exp[[key]])
+    list(sexp = sexp, mon_dict = mon_dict)
   }
 
-  message("=== Identifying horizontal shifts ===")
-  hs_result <- identify_horizontal_shifts(
-    smoothed_exp_dict  = smoothed_exp,
-    smoothed_inc_dict  = smoothed_inc,
-    monotonicity_dict  = monotonicity_dict,
-    mkt_gd_df          = mkt_gd_df,
-    group_dict         = group_dict,
-    evl_points         = evaluation_points,
-    market_id          = market_id,
-    good_id            = good_id,
-    period_0           = period_0,
-    period_1           = period_1
-  )
-  yh0                     <- hs_result$yh0
-  yh1                     <- hs_result$yh1
-  p0_in_p1                <- hs_result$p0_in_p1
-  p1_in_p0                <- hs_result$p1_in_p0
-  use_curves              <- hs_result$use_curves
-  num_useable_goods_group <- hs_result$num_useable_goods_group
+  if (exact_price_correction) {
+    # Read price data and build d_price_dict
+    message("=== Reading price data ===")
+    price_df     <- read_csv(price_data, show_col_types = FALSE)
+    d_price_dict <- setNames(
+      as.list(price_df[[d_price_var]]),
+      paste0(price_df[[market_id]], "_", price_df[[good_id]])
+    )
+
+    # Two-pass exact price correction (AFFG Proposition 1)
+    smoothed_exp_for_p0 <- apply_exact_price_correction(
+      smoothed_exp, d_price_dict, group_dict, sigma,
+      period_to_adjust = period_0, period_0 = period_0, period_1 = period_1)
+    smoothed_exp_for_p1 <- apply_exact_price_correction(
+      smoothed_exp, d_price_dict, group_dict, sigma,
+      period_to_adjust = period_1, period_0 = period_0, period_1 = period_1)
+
+    # Pass 1: adjusted period 0 curves -> extract yh1 for logP0
+    message("=== Checking monotonicity (pass 1: for P0) ===")
+    res_p0 <- apply_monotonicity(smoothed_exp_for_p0)
+    smoothed_exp_for_p0  <- res_p0$sexp
+    monotonicity_dict_p0 <- res_p0$mon_dict
+
+    message("=== Identifying horizontal shifts (pass 1: for P0) ===")
+    hs_p0 <- identify_horizontal_shifts(
+      smoothed_exp_dict = smoothed_exp_for_p0, smoothed_inc_dict = smoothed_inc,
+      monotonicity_dict = monotonicity_dict_p0, mkt_gd_df = mkt_gd_df,
+      group_dict = group_dict, evl_points = evaluation_points,
+      market_id = market_id, good_id = good_id, period_0 = period_0, period_1 = period_1)
+
+    # Pass 2: adjusted period 1 curves -> extract yh0 for logP1
+    message("=== Checking monotonicity (pass 2: for P1) ===")
+    res_p1 <- apply_monotonicity(smoothed_exp_for_p1)
+    smoothed_exp_for_p1  <- res_p1$sexp
+    monotonicity_dict_p1 <- res_p1$mon_dict
+
+    message("=== Identifying horizontal shifts (pass 2: for P1) ===")
+    hs_p1 <- identify_horizontal_shifts(
+      smoothed_exp_dict = smoothed_exp_for_p1, smoothed_inc_dict = smoothed_inc,
+      monotonicity_dict = monotonicity_dict_p1, mkt_gd_df = mkt_gd_df,
+      group_dict = group_dict, evl_points = evaluation_points,
+      market_id = market_id, good_id = good_id, period_0 = period_0, period_1 = period_1)
+
+    # Combine: yh1 from pass 1 (for logP0), yh0 from pass 2 (for logP1)
+    yh1 <- hs_p0$yh1
+    yh0 <- hs_p1$yh0
+
+    # Merge use_curves: a good is useable if monotonic in either pass
+    use_curves <- hs_p0$use_curves
+    for (key in names(hs_p1$use_curves)) {
+      if (is.null(use_curves[[key]])) use_curves[[key]] <- hs_p1$use_curves[[key]]
+    }
+    p0_in_p1                <- hs_p0$p0_in_p1
+    p1_in_p0                <- hs_p0$p1_in_p0
+    num_useable_goods_group <- hs_p0$num_useable_goods_group
+
+    # Use unadjusted smoothed_exp for the final monotonicity_dict
+    message("=== Checking monotonicity (unadjusted curves for welfare df) ===")
+    res_unadj <- apply_monotonicity(smoothed_exp)
+    smoothed_exp      <- res_unadj$sexp
+    monotonicity_dict <- res_unadj$mon_dict
+
+  } else {
+    message("=== Checking monotonicity ===")
+    res <- apply_monotonicity(smoothed_exp)
+    smoothed_exp      <- res$sexp
+    monotonicity_dict <- res$mon_dict
+
+    message("=== Identifying horizontal shifts ===")
+    hs_result <- identify_horizontal_shifts(
+      smoothed_exp_dict  = smoothed_exp,
+      smoothed_inc_dict  = smoothed_inc,
+      monotonicity_dict  = monotonicity_dict,
+      mkt_gd_df          = mkt_gd_df,
+      group_dict         = group_dict,
+      evl_points         = evaluation_points,
+      market_id          = market_id,
+      good_id            = good_id,
+      period_0           = period_0,
+      period_1           = period_1
+    )
+    yh0                     <- hs_result$yh0
+    yh1                     <- hs_result$yh1
+    p0_in_p1                <- hs_result$p0_in_p1
+    p1_in_p0                <- hs_result$p1_in_p0
+    use_curves              <- hs_result$use_curves
+    num_useable_goods_group <- hs_result$num_useable_goods_group
+  }
+
+  # First-order price correction: compute bias dicts (used later when constructing logP0/logP1)
+  if (first_order_approx) {
+    message("=== Computing first-order price correction ===")
+    if (!exists("d_price_dict")) {
+      price_df     <- read_csv(price_data, show_col_types = FALSE)
+      d_price_dict <- setNames(
+        as.list(price_df[[d_price_var]]),
+        paste0(price_df[[market_id]], "_", price_df[[good_id]])
+      )
+    }
+    fo_result  <- apply_first_order_price_correction(
+      smoothed_exp, smoothed_inc, d_price_dict, group_dict, sigma,
+      period_0, period_1, monotonicity_dict)
+    bias0_dict <- fo_result$bias0_dict
+    bias1_dict <- fo_result$bias1_dict
+  }
 
   message("=== Building welfare dataframe ===")
   welfare_df <- gen_welfare_df(
@@ -281,6 +376,32 @@ if (compute_welfare) {
     period_1           = period_1
   )
 
+  # Merge first-order bias into welfare_df if applicable
+  # welfare_df$percentile is in [0,1] scale; dict_to_df produces integer percentile (0-100)
+  if (first_order_approx) {
+    message("=== Merging first-order bias ===")
+    if (length(bias0_dict) > 0) {
+      bias0_df <- dict_to_df(bias0_dict, c(market_id, good_id), "bias0",
+                             eval_grid, evaluation_points)
+      bias0_df$percentile <- bias0_df$percentile / evaluation_points
+      welfare_df <- welfare_df %>%
+        left_join(bias0_df, by = c(market_id, good_id, "percentile"))
+    } else {
+      welfare_df$bias0 <- NA_real_
+    }
+    if (length(bias1_dict) > 0) {
+      bias1_df <- dict_to_df(bias1_dict, c(market_id, good_id), "bias1",
+                             eval_grid, evaluation_points)
+      bias1_df$percentile <- bias1_df$percentile / evaluation_points
+      welfare_df <- welfare_df %>%
+        left_join(bias1_df, by = c(market_id, good_id, "percentile"))
+    } else {
+      welfare_df$bias1 <- NA_real_
+    }
+    welfare_df$bias0 <- ifelse(is.na(welfare_df$bias0), 0, welfare_df$bias0)
+    welfare_df$bias1 <- ifelse(is.na(welfare_df$bias1), 0, welfare_df$bias1)
+  }
+
   ### Construct P0 and P1
   message("=== Constructing P0 and P1 ===")
   engel_outlays_var0 <- "log_smoothed_outlays0"
@@ -292,13 +413,21 @@ if (compute_welfare) {
   welfare_df$wt_mkt_prd <- welfare_df[[wts_prd0]] + welfare_df[[wts_prd1]]
 
   # logP0
-  welfare_df$logP0        <- welfare_df$yh1 - welfare_df[[engel_outlays_var0]]
+  if (first_order_approx) {
+    welfare_df$logP0 <- welfare_df$yh1 - welfare_df[[engel_outlays_var0]] - welfare_df$bias0
+  } else {
+    welfare_df$logP0 <- welfare_df$yh1 - welfare_df[[engel_outlays_var0]]
+  }
   welfare_df$logP0        <- ifelse(welfare_df$use_curves == 0, NA, welfare_df$logP0)
   welfare_df$logP0_ranked <- welfare_df$logP0
   welfare_df$logP0        <- ifelse(is.infinite(welfare_df$logP0), NA, welfare_df$logP0)
 
   # logP1
-  welfare_df$logP1        <- welfare_df$yh0 - welfare_df[[engel_outlays_var1]]
+  if (first_order_approx) {
+    welfare_df$logP1 <- welfare_df$yh0 - welfare_df[[engel_outlays_var1]] - welfare_df$bias1
+  } else {
+    welfare_df$logP1 <- welfare_df$yh0 - welfare_df[[engel_outlays_var1]]
+  }
   welfare_df$logP1        <- ifelse(welfare_df$use_curves == 0, NA, welfare_df$logP1)
   welfare_df$logP1_ranked <- -1.0 * welfare_df$logP1
   welfare_df$logP1        <- ifelse(is.infinite(welfare_df$logP1), NA, welfare_df$logP1)
@@ -323,10 +452,25 @@ if (compute_welfare) {
   welfare_df <- welfare_df %>%
     left_join(minmaxdf, by = groupby_vars)
 
-  ### Identify non-crossing points
+  ### Identify non-crossing points (vectorized to avoid apply()'s character-matrix coercion)
   message("=== Identifying non-crossings ===")
-  welfare_df$logP0_ranked <- apply(welfare_df, 1, identify_non_crossings, p0_or_p1 = "P0")
-  welfare_df$logP1_ranked <- apply(welfare_df, 1, identify_non_crossings, p0_or_p1 = "P1")
+  amt_to_add <- 0.0001
+
+  welfare_df$logP0_ranked <- dplyr::case_when(
+    welfare_df$curve_mon1 ==  1 & is.infinite(welfare_df$yh1) & welfare_df$yh1 > 0 ~ welfare_df$maxlogP0 + amt_to_add,
+    welfare_df$curve_mon1 ==  1 & is.infinite(welfare_df$yh1) & welfare_df$yh1 < 0 ~ welfare_df$minlogP0 - amt_to_add,
+    welfare_df$curve_mon1 == -1 & is.infinite(welfare_df$yh1) & welfare_df$yh1 > 0 ~ welfare_df$minlogP0 - amt_to_add,
+    welfare_df$curve_mon1 == -1 & is.infinite(welfare_df$yh1) & welfare_df$yh1 < 0 ~ welfare_df$maxlogP0 + amt_to_add,
+    TRUE ~ welfare_df$logP0_ranked
+  )
+
+  welfare_df$logP1_ranked <- dplyr::case_when(
+    welfare_df$curve_mon0 ==  1 & is.infinite(welfare_df$yh0) & welfare_df$yh0 > 0 ~ welfare_df$minlogP1 - amt_to_add,
+    welfare_df$curve_mon0 ==  1 & is.infinite(welfare_df$yh0) & welfare_df$yh0 < 0 ~ welfare_df$maxlogP1 + amt_to_add,
+    welfare_df$curve_mon0 == -1 & is.infinite(welfare_df$yh0) & welfare_df$yh0 > 0 ~ welfare_df$maxlogP1 + amt_to_add,
+    welfare_df$curve_mon0 == -1 & is.infinite(welfare_df$yh0) & welfare_df$yh0 < 0 ~ welfare_df$minlogP1 - amt_to_add,
+    TRUE ~ welfare_df$logP1_ranked
+  )
 
   ### Take medians
   message("=== Computing medians ===")
@@ -530,6 +674,7 @@ if (compute_welfare) {
   }
 
   lastpart <- ""
+  if (exact_price_correction) lastpart <- "_exact_price"
 
   # Plot: simple median
   plot_bars(welfare_plot_df, "pc_P1", "pc_P0",

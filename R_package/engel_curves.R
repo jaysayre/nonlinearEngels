@@ -1,7 +1,13 @@
 ### engel_curves.R
 ### Jay Sayre - sayrejay (at) pm dot me
 
-library(tidyverse)
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(ggplot2)
+library(purrr)
+library(stringr)
+library(readr)
 library(haven)
 library(splines)
 
@@ -98,7 +104,7 @@ monotonicity_tails <- function(a, evl_grid, evl_points, prcntl = 0.05,
   diffs_sign <- sapply(raw_diffs, return_sign)
 
   # Average forward/backward diffs (matching Python)
-  diffs <- rowMeans(rbind(
+  diffs <- colMeans(rbind(
     c(diffs_sign[1], diffs_sign),
     c(diffs_sign, diffs_sign[length(diffs_sign)])
   ), na.rm = FALSE)
@@ -183,20 +189,32 @@ monotonicity_tails <- function(a, evl_grid, evl_points, prcntl = 0.05,
 
   if (type_extrapolation == "spline") {
     f <- splinefun(x_interior, a_interior, method = "natural")
-  } else {
-    f <- approxfun(x_interior, a_interior, rule = 2)
+    return(f(evl_grid))
   }
-  f(evl_grid)
+
+  # Linear interpolation with linear extrapolation (matching Python's
+  # interp1d(..., fill_value='extrapolate'))
+  f_interp <- approxfun(x_interior, a_interior, rule = 2)
+  result <- f_interp(evl_grid)
+  n_int <- length(x_interior)
+  slope_lo <- (a_interior[2] - a_interior[1]) / (x_interior[2] - x_interior[1])
+  slope_hi <- (a_interior[n_int] - a_interior[n_int - 1]) /
+              (x_interior[n_int] - x_interior[n_int - 1])
+  below <- evl_grid < x_interior[1]
+  above <- evl_grid > x_interior[n_int]
+  result[below] <- a_interior[1] + slope_lo * (evl_grid[below] - x_interior[1])
+  result[above] <- a_interior[n_int] + slope_hi * (evl_grid[above] - x_interior[n_int])
+  result
 }
 
 # ── Monotonicity check ──────────────────────────────────────────────────────
 monotonicity_check <- function(a) {
   diffs <- a[2:length(a)] - a[1:(length(a) - 1)]
   diffs <- diffs[!is.na(diffs)]
-  if (length(diffs) == 0) return(NULL)
+  if (length(diffs) == 0) return(NA_real_)
   if (min(diffs) > 0) return(1)
   if (max(diffs) < 0) return(-1)
-  NULL
+  NA_real_
 }
 
 # ── Replace negative expenditure shares ──────────────────────────────────────
@@ -216,6 +234,210 @@ replace_neg_exp_shares <- function(a, evl_grid) {
     }
   }
   a
+}
+
+# ── Exact price correction (AFFG Proposition 1) ──────────────────────────────
+apply_exact_price_correction <- function(smoothed_exp, d_price_dict, group_dict,
+                                          sigma, period_to_adjust, period_0, period_1) {
+  # Deep copy
+  adjusted <- lapply(smoothed_exp, function(x) x)
+
+  # Apply exponential adjustment to the specified period only
+  for (key in names(adjusted)) {
+    parts <- strsplit(key, "_")[[1]]
+    mkt <- parts[1]
+    prd <- parts[2]
+    gd  <- paste(parts[3:length(parts)], collapse = "_")
+
+    if (prd != as.character(period_to_adjust)) next
+    mg_key <- paste0(mkt, "_", gd)
+    if (is.null(d_price_dict[[mg_key]])) next
+    dp <- d_price_dict[[mg_key]]
+
+    if (prd == as.character(period_0)) {
+      adjusted[[key]] <- adjusted[[key]] * exp(-(sigma - 1) * dp)
+    } else if (prd == as.character(period_1)) {
+      adjusted[[key]] <- adjusted[[key]] * exp((sigma - 1) * dp)
+    }
+  }
+
+  # Renormalize within each (mkt, prd, group) at each percentile point
+  group_sums <- list()
+  for (key in names(adjusted)) {
+    parts <- strsplit(key, "_")[[1]]
+    mkt <- parts[1]
+    prd <- parts[2]
+    gd  <- paste(parts[3:length(parts)], collapse = "_")
+
+    if (prd != as.character(period_to_adjust)) next
+    grp <- group_dict[[gd]]
+    if (is.null(grp)) next
+    sum_key <- paste0(mkt, "_", prd, "_", grp)
+    if (is.null(group_sums[[sum_key]])) {
+      group_sums[[sum_key]] <- rep(0, length(adjusted[[key]]))
+    }
+    group_sums[[sum_key]] <- group_sums[[sum_key]] + adjusted[[key]]
+  }
+
+  for (key in names(adjusted)) {
+    parts <- strsplit(key, "_")[[1]]
+    mkt <- parts[1]
+    prd <- parts[2]
+    gd  <- paste(parts[3:length(parts)], collapse = "_")
+
+    if (prd != as.character(period_to_adjust)) next
+    grp <- group_dict[[gd]]
+    if (is.null(grp)) next
+    sum_key <- paste0(mkt, "_", prd, "_", grp)
+    denom <- group_sums[[sum_key]]
+    adjusted[[key]] <- ifelse(denom != 0, adjusted[[key]] / denom, adjusted[[key]])
+  }
+
+  adjusted
+}
+
+# ── First-order price correction (AFFG Equation 8) ──────────────────────────
+apply_first_order_price_correction <- function(smoothed_exp, smoothed_inc, d_price_dict,
+                                                group_dict, sigma, period_0, period_1,
+                                                monotonicity_dict) {
+  # Compute slopes d(log_y)/d(w) at each evaluation point
+  compute_slopes <- function(w, log_y) {
+    n <- length(w)
+    dw   <- diff(w)
+    dlog <- diff(log_y)
+
+    slope_below <- rep(NA_real_, n)
+    slope_above <- rep(NA_real_, n)
+    # Avoid division by zero
+    safe_ratio <- ifelse(abs(dw) > 1e-15, dlog / dw, NA_real_)
+    slope_below[2:n] <- safe_ratio
+    slope_above[1:(n - 1)] <- safe_ratio
+
+    abs_below <- abs(slope_below)
+    abs_above <- abs(slope_above)
+
+    # Pick the one with smaller absolute value; handle NaNs
+    slope <- rep(NA_real_, n)
+    for (i in seq_len(n)) {
+      has_below <- !is.na(slope_below[i])
+      has_above <- !is.na(slope_above[i])
+      if (has_above && has_below) {
+        # Where both exist and disagree in sign → set missing
+        if (slope_below[i] * slope_above[i] < 0) {
+          slope[i] <- NA_real_
+        } else {
+          slope[i] <- ifelse(abs_above[i] <= abs_below[i], slope_above[i], slope_below[i])
+        }
+      } else if (has_above) {
+        slope[i] <- slope_above[i]
+      } else if (has_below) {
+        slope[i] <- slope_below[i]
+      }
+    }
+
+    # 3-point smoothing
+    smooth <- rep(NA_real_, n)
+    for (i in seq_len(n)) {
+      vals <- c()
+      if (i > 1 && !is.na(slope[i - 1])) vals <- c(vals, slope[i - 1])
+      if (!is.na(slope[i])) vals <- c(vals, slope[i])
+      if (i < n && !is.na(slope[i + 1])) vals <- c(vals, slope[i + 1])
+      if (length(vals) > 0) smooth[i] <- mean(vals)
+    }
+    smooth
+  }
+
+  bias0_dict <- list()
+  bias1_dict <- list()
+
+  # Collect all (mkt, gd) pairs that exist in both periods with price data
+  mkt_gd_pairs <- list()
+  for (key in names(smoothed_exp)) {
+    parts <- strsplit(key, "_")[[1]]
+    mkt <- parts[1]
+    prd <- parts[2]
+    gd  <- paste(parts[3:length(parts)], collapse = "_")
+    mg_key <- paste0(mkt, "_", gd)
+    if (is.null(d_price_dict[[mg_key]])) next
+    other_prd <- if (prd == as.character(period_0)) as.character(period_1) else as.character(period_0)
+    other_key <- paste0(mkt, "_", other_prd, "_", gd)
+    if (!is.null(smoothed_exp[[other_key]])) {
+      mkt_gd_pairs[[mg_key]] <- c(mkt, gd)
+    }
+  }
+
+  # Compute slopes for each (mkt, prd, gd)
+  slopes <- list()
+  for (mg_key in names(mkt_gd_pairs)) {
+    mkt <- mkt_gd_pairs[[mg_key]][1]
+    gd  <- mkt_gd_pairs[[mg_key]][2]
+    for (prd in c(as.character(period_0), as.character(period_1))) {
+      key <- paste0(mkt, "_", prd, "_", gd)
+      if (is.null(smoothed_exp[[key]])) next
+      inc_key <- paste0(mkt, "_", prd)
+      log_y <- smoothed_inc[[inc_key]]
+      if (is.null(log_y)) next
+      # Only compute for monotonic curves
+      mon <- monotonicity_dict[[key]]
+      if (is.na(mon) || mon == 0) next
+      slopes[[key]] <- compute_slopes(smoothed_exp[[key]], log_y)
+    }
+  }
+
+  # Group the (mkt, gd) pairs by (mkt, group)
+  mkt_group_goods <- list()
+  for (mg_key in names(mkt_gd_pairs)) {
+    mkt <- mkt_gd_pairs[[mg_key]][1]
+    gd  <- mkt_gd_pairs[[mg_key]][2]
+    grp <- group_dict[[gd]]
+    if (is.null(grp)) next
+    mg_grp_key <- paste0(mkt, "_", grp)
+    if (is.null(mkt_group_goods[[mg_grp_key]])) {
+      mkt_group_goods[[mg_grp_key]] <- c()
+    }
+    mkt_group_goods[[mg_grp_key]] <- c(mkt_group_goods[[mg_grp_key]], gd)
+  }
+
+  # Compute simple equal-weighted group-average price changes
+  dp_avg <- list()
+  for (mg_grp_key in names(mkt_group_goods)) {
+    goods <- mkt_group_goods[[mg_grp_key]]
+    mkt <- strsplit(mg_grp_key, "_")[[1]][1]
+    dps <- c()
+    for (gd in goods) {
+      mg_key <- paste0(mkt, "_", gd)
+      if (!is.null(d_price_dict[[mg_key]])) dps <- c(dps, d_price_dict[[mg_key]])
+    }
+    if (length(dps) > 0) dp_avg[[mg_grp_key]] <- mean(dps)
+  }
+
+  # Compute per-good bias
+  for (mg_key in names(mkt_gd_pairs)) {
+    mkt <- mkt_gd_pairs[[mg_key]][1]
+    gd  <- mkt_gd_pairs[[mg_key]][2]
+    grp <- group_dict[[gd]]
+    dp  <- d_price_dict[[mg_key]]
+    mg_grp_key <- paste0(mkt, "_", grp)
+    dp_bar <- if (!is.null(dp_avg[[mg_grp_key]])) dp_avg[[mg_grp_key]] else 0
+
+    # Bias for P0: uses period-0 slopes and +dp direction
+    key0 <- paste0(mkt, "_", period_0, "_", gd)
+    if (!is.null(slopes[[key0]])) {
+      bias0_dict[[mg_key]] <- slopes[[key0]] * sigma * (dp - dp_bar)
+    } else if (!is.null(smoothed_exp[[key0]])) {
+      bias0_dict[[mg_key]] <- rep(NA_real_, length(smoothed_exp[[key0]]))
+    }
+
+    # Bias for P1: uses period-1 slopes and -dp direction
+    key1 <- paste0(mkt, "_", period_1, "_", gd)
+    if (!is.null(slopes[[key1]])) {
+      bias1_dict[[mg_key]] <- slopes[[key1]] * sigma * (-dp - (-dp_bar))
+    } else if (!is.null(smoothed_exp[[key1]])) {
+      bias1_dict[[mg_key]] <- rep(NA_real_, length(smoothed_exp[[key1]]))
+    }
+  }
+
+  list(bias0_dict = bias0_dict, bias1_dict = bias1_dict)
 }
 
 # ── Compute percentage overlap ───────────────────────────────────────────────
@@ -372,35 +594,40 @@ gen_good_cons_df <- function(df, hh_exp_df, group_df, hh_id, period_id, market_i
     left_join(df %>% select(all_of(c(hh_id, good_id, exp_var))),
               by = c(hh_id, good_id))
 
-  # Build full grid for 2-period households (period 0)
-  grid_2p_p0 <- data.frame(
-    hh_tmp = rep(sort(hh_2_periods), each = length(goods)),
-    gd_tmp = rep(goods, times = length(hh_2_periods)),
-    stringsAsFactors = FALSE
-  )
-  names(grid_2p_p0) <- c(hh_id, good_id)
-  grid_2p_p0 <- grid_2p_p0 %>%
-    left_join(hh_mkt_df, by = hh_id)
-  grid_2p_p0[[period_id]] <- period_0
-  grid_2p_p0 <- grid_2p_p0 %>%
-    left_join(df %>% select(all_of(c(hh_id, good_id, period_id, exp_var))),
-              by = c(hh_id, good_id, period_id))
+  # Build full grid for 2-period households (only if any exist)
+  if (length(hh_2_periods) > 0) {
+    grid_2p_p0 <- data.frame(
+      hh_tmp = rep(sort(hh_2_periods), each = length(goods)),
+      gd_tmp = rep(goods, times = length(hh_2_periods)),
+      stringsAsFactors = FALSE
+    )
+    names(grid_2p_p0) <- c(hh_id, good_id)
+    grid_2p_p0 <- grid_2p_p0 %>%
+      left_join(hh_mkt_df, by = hh_id)
+    grid_2p_p0[[period_id]] <- period_0
+    grid_2p_p0 <- grid_2p_p0 %>%
+      left_join(df %>% select(all_of(c(hh_id, good_id, period_id, exp_var))),
+                by = c(hh_id, good_id, period_id))
 
-  # Build full grid for 2-period households (period 1)
-  grid_2p_p1 <- data.frame(
-    hh_tmp = rep(sort(hh_2_periods), each = length(goods)),
-    gd_tmp = rep(goods, times = length(hh_2_periods)),
-    stringsAsFactors = FALSE
-  )
-  names(grid_2p_p1) <- c(hh_id, good_id)
-  grid_2p_p1 <- grid_2p_p1 %>%
-    left_join(hh_mkt_df, by = hh_id)
-  grid_2p_p1[[period_id]] <- period_1
-  grid_2p_p1 <- grid_2p_p1 %>%
-    left_join(df %>% select(all_of(c(hh_id, good_id, period_id, exp_var))),
-              by = c(hh_id, good_id, period_id))
+    grid_2p_p1 <- data.frame(
+      hh_tmp = rep(sort(hh_2_periods), each = length(goods)),
+      gd_tmp = rep(goods, times = length(hh_2_periods)),
+      stringsAsFactors = FALSE
+    )
+    names(grid_2p_p1) <- c(hh_id, good_id)
+    grid_2p_p1 <- grid_2p_p1 %>%
+      left_join(hh_mkt_df, by = hh_id)
+    grid_2p_p1[[period_id]] <- period_1
+    grid_2p_p1 <- grid_2p_p1 %>%
+      left_join(df %>% select(all_of(c(hh_id, good_id, period_id, exp_var))),
+                by = c(hh_id, good_id, period_id))
 
-  good_cons_df <- bind_rows(grid_1p, grid_2p_p0, grid_2p_p1) %>%
+    good_cons_df <- bind_rows(grid_1p, grid_2p_p0, grid_2p_p1)
+  } else {
+    good_cons_df <- grid_1p
+  }
+
+  good_cons_df <- good_cons_df %>%
     left_join(group_df, by = good_id)
   good_cons_df[[exp_var]] <- ifelse(is.na(good_cons_df[[exp_var]]), 0, good_cons_df[[exp_var]])
 
@@ -505,7 +732,7 @@ identify_horizontal_shifts <- function(smoothed_exp_dict, smoothed_inc_dict, mon
       mon_p0 <- monotonicity_dict[[mon_p0_key]]
       mon_p1 <- monotonicity_dict[[mon_p1_key]]
 
-      if (!is.null(mon_p0) && !is.null(mon_p1) && identical(mon_p0, mon_p1)) {
+      if (!is.na(mon_p0) && !is.na(mon_p1) && identical(mon_p0, mon_p1)) {
         use_curves[[mg_key]] <- 1
         grp_key <- paste0(mkt, "_", group_dict[[as.character(gd)]])
         num_useable_goods_group[[grp_key]] <- num_useable_goods_group[[grp_key]] + 1
@@ -524,16 +751,21 @@ gen_welfare_df <- function(smoothed_inc_dict, smoothed_exp_dict, smoothed_df,
                            evl_grid, evl_points, market_id, good_id, group_id,
                            period_id, period_0, period_1) {
 
-  # Pivot smoothed_df wider on period
+  # Pivot smoothed_df wider on period (select only needed columns first, matching Python)
   smoothed_df <- smoothed_df %>%
+    select(all_of(c(market_id, good_id, group_id, period_id,
+                    "num_households_mkt", "wt_mkt_prd"))) %>%
+    distinct() %>%
     pivot_wider(names_from = all_of(period_id),
                 values_from = c("num_households_mkt", "wt_mkt_prd"),
-                names_glue = "{.value}{period_id}")
-  # Fix column names to match Python: num_households_mkt0, wt_mkt_prd0, etc.
-  names(smoothed_df) <- gsub(paste0("num_households_mkt", period_0), "num_households_mkt0", names(smoothed_df))
-  names(smoothed_df) <- gsub(paste0("num_households_mkt", period_1), "num_households_mkt1", names(smoothed_df))
-  names(smoothed_df) <- gsub(paste0("wt_mkt_prd", period_0), "wt_mkt_prd0", names(smoothed_df))
-  names(smoothed_df) <- gsub(paste0("wt_mkt_prd", period_1), "wt_mkt_prd1", names(smoothed_df))
+                names_sep = "__prd__")
+  # Periods were recoded to 0/1 by gen_comparison_df, so use 0/1 for rename
+  nm <- names(smoothed_df)
+  nm[nm == "num_households_mkt__prd__0"] <- "num_households_mkt0"
+  nm[nm == "num_households_mkt__prd__1"] <- "num_households_mkt1"
+  nm[nm == "wt_mkt_prd__prd__0"] <- "wt_mkt_prd0"
+  nm[nm == "wt_mkt_prd__prd__1"] <- "wt_mkt_prd1"
+  names(smoothed_df) <- nm
 
   # Build smoothed_exp_df from dict
   smoothed_exp_df <- dict_to_df(smoothed_exp_dict, c(market_id, period_id, good_id),
@@ -541,11 +773,11 @@ gen_welfare_df <- function(smoothed_inc_dict, smoothed_exp_dict, smoothed_df,
   smoothed_exp_df <- smoothed_exp_df %>%
     pivot_wider(names_from = all_of(period_id),
                 values_from = "smoothed_exp_share_g",
-                names_prefix = "smoothed_exp_share_g")
-  names(smoothed_exp_df) <- gsub(paste0("smoothed_exp_share_g", period_0),
-                                  "smoothed_exp_share_g0", names(smoothed_exp_df))
-  names(smoothed_exp_df) <- gsub(paste0("smoothed_exp_share_g", period_1),
-                                  "smoothed_exp_share_g1", names(smoothed_exp_df))
+                names_prefix = "smoothed_exp_share_g_prd_")
+  nm <- names(smoothed_exp_df)
+  nm[nm == paste0("smoothed_exp_share_g_prd_", period_0)] <- "smoothed_exp_share_g0"
+  nm[nm == paste0("smoothed_exp_share_g_prd_", period_1)] <- "smoothed_exp_share_g1"
+  names(smoothed_exp_df) <- nm
 
   # Build smoothed_inc_df from dict
   smoothed_inc_df <- dict_to_df(smoothed_inc_dict, c(market_id, period_id),
@@ -553,11 +785,11 @@ gen_welfare_df <- function(smoothed_inc_dict, smoothed_exp_dict, smoothed_df,
   smoothed_inc_df <- smoothed_inc_df %>%
     pivot_wider(names_from = all_of(period_id),
                 values_from = "log_smoothed_outlays",
-                names_prefix = "log_smoothed_outlays")
-  names(smoothed_inc_df) <- gsub(paste0("log_smoothed_outlays", period_0),
-                                  "log_smoothed_outlays0", names(smoothed_inc_df))
-  names(smoothed_inc_df) <- gsub(paste0("log_smoothed_outlays", period_1),
-                                  "log_smoothed_outlays1", names(smoothed_inc_df))
+                names_prefix = "log_smoothed_outlays_prd_")
+  nm <- names(smoothed_inc_df)
+  nm[nm == paste0("log_smoothed_outlays_prd_", period_0)] <- "log_smoothed_outlays0"
+  nm[nm == paste0("log_smoothed_outlays_prd_", period_1)] <- "log_smoothed_outlays1"
+  names(smoothed_inc_df) <- nm
 
   # Build num_goods_df
   num_goods_df <- data.frame(
@@ -567,11 +799,10 @@ gen_welfare_df <- function(smoothed_inc_dict, smoothed_exp_dict, smoothed_df,
     stringsAsFactors = FALSE
   )
   names(num_goods_df)[1:2] <- c(market_id, group_id)
-  # Convert types to match
-  suppressWarnings({
-    num_goods_df[[market_id]] <- as.numeric(num_goods_df[[market_id]])
-    num_goods_df[[group_id]]  <- as.numeric(num_goods_df[[group_id]])
-  })
+  for (col in c(market_id, group_id)) {
+    suppressWarnings({ num_vals <- as.numeric(num_goods_df[[col]]) })
+    if (!any(is.na(num_vals))) num_goods_df[[col]] <- num_vals
+  }
 
   # Build yh0_df, yh1_df
   yh0_df <- dict_to_df(yh0_dict, c(market_id, good_id), "yh0", evl_grid, evl_points)
@@ -580,7 +811,7 @@ gen_welfare_df <- function(smoothed_inc_dict, smoothed_exp_dict, smoothed_df,
 
   # Build monotonicity_df
   mon_keys <- names(monotonicity_dict)
-  mon_vals <- unlist(lapply(monotonicity_dict, function(x) if (is.null(x)) NA_real_ else x))
+  mon_vals <- as.numeric(unlist(monotonicity_dict))
   monotonicity_df <- data.frame(
     mkt_tmp = sapply(mon_keys, function(k) strsplit(k, "_")[[1]][1]),
     prd_tmp = sapply(mon_keys, function(k) strsplit(k, "_")[[1]][2]),
@@ -589,36 +820,30 @@ gen_welfare_df <- function(smoothed_inc_dict, smoothed_exp_dict, smoothed_df,
     stringsAsFactors = FALSE, row.names = NULL
   )
   names(monotonicity_df)[1:3] <- c(market_id, period_id, good_id)
-  suppressWarnings({
-    monotonicity_df[[market_id]] <- as.numeric(monotonicity_df[[market_id]])
-    monotonicity_df[[period_id]] <- as.numeric(monotonicity_df[[period_id]])
-    monotonicity_df[[good_id]]   <- as.numeric(monotonicity_df[[good_id]])
-  })
+  for (col in c(market_id, period_id, good_id)) {
+    suppressWarnings({ num_vals <- as.numeric(monotonicity_df[[col]]) })
+    if (!any(is.na(num_vals))) monotonicity_df[[col]] <- num_vals
+  }
   monotonicity_df <- monotonicity_df %>%
     pivot_wider(names_from = all_of(period_id), values_from = "curve_mon",
                 names_prefix = "curve_mon_prd")
 
-  # Build p01_df from use_curves, p0_in_p1, p1_in_p0
-  p01_keys <- names(use_curves_dict)
-  if (length(p01_keys) == 0) {
-    # No useable curves
-    p01_df <- data.frame(matrix(ncol = 7, nrow = 0))
-    names(p01_df) <- c(market_id, good_id, "p0_in_p1", "p1_in_p0", "use_curves", "curve_mon0", "curve_mon1")
-  } else {
+  # Build p01_df from all market-good keys
+  all_mg_keys <- union(names(p0_in_p1_dict), names(p1_in_p0_dict))
+  if (length(all_mg_keys) > 0) {
     p01_df <- data.frame(
-      mkt_tmp    = sapply(p01_keys, function(k) strsplit(k, "_")[[1]][1]),
-      gd_tmp     = sapply(p01_keys, function(k) strsplit(k, "_")[[1]][2]),
-      p0_in_p1   = as.numeric(sapply(p01_keys, function(k) p0_in_p1_dict[[k]])),
-      p1_in_p0   = as.numeric(sapply(p01_keys, function(k) p1_in_p0_dict[[k]])),
-      use_curves = as.numeric(unlist(use_curves_dict[p01_keys])),
+      mkt_tmp    = sapply(all_mg_keys, function(k) strsplit(k, "_")[[1]][1]),
+      gd_tmp     = sapply(all_mg_keys, function(k) strsplit(k, "_")[[1]][2]),
+      p0_in_p1   = as.numeric(sapply(all_mg_keys, function(k) { v <- p0_in_p1_dict[[k]]; if(is.null(v)) NA else v })),
+      p1_in_p0   = as.numeric(sapply(all_mg_keys, function(k) { v <- p1_in_p0_dict[[k]]; if(is.null(v)) NA else v })),
+      use_curves = as.numeric(sapply(all_mg_keys, function(k) { v <- use_curves_dict[[k]]; if(is.null(v)) 0 else v })),
       stringsAsFactors = FALSE, row.names = NULL
     )
     names(p01_df)[1:2] <- c(market_id, good_id)
-    suppressWarnings({
-      p01_df[[market_id]] <- as.numeric(p01_df[[market_id]])
-      p01_df[[good_id]]   <- as.numeric(p01_df[[good_id]])
-    })
-
+    for (col in c(market_id, good_id)) {
+      suppressWarnings({ num_vals <- as.numeric(p01_df[[col]]) })
+      if (!any(is.na(num_vals))) p01_df[[col]] <- num_vals
+    }
     # Merge monotonicity for the two periods
     mon_p0_col <- paste0("curve_mon_prd", period_0)
     mon_p1_col <- paste0("curve_mon_prd", period_1)
@@ -626,40 +851,26 @@ gen_welfare_df <- function(smoothed_inc_dict, smoothed_exp_dict, smoothed_df,
     p01_df <- p01_df %>% left_join(mon_wide, by = c(market_id, good_id))
     names(p01_df)[names(p01_df) == mon_p0_col] <- "curve_mon0"
     names(p01_df)[names(p01_df) == mon_p1_col] <- "curve_mon1"
-  }
-
-  # Also build p01_df for non-use_curves keys (from p0_in_p1)
-  all_mg_keys <- union(names(p0_in_p1_dict), names(p1_in_p0_dict))
-  non_use_keys <- setdiff(all_mg_keys, p01_keys)
-  if (length(non_use_keys) > 0) {
-    non_use_df <- data.frame(
-      mkt_tmp    = sapply(non_use_keys, function(k) strsplit(k, "_")[[1]][1]),
-      gd_tmp     = sapply(non_use_keys, function(k) strsplit(k, "_")[[1]][2]),
-      p0_in_p1   = as.numeric(sapply(non_use_keys, function(k) {v <- p0_in_p1_dict[[k]]; if(is.null(v)) NA else v})),
-      p1_in_p0   = as.numeric(sapply(non_use_keys, function(k) {v <- p1_in_p0_dict[[k]]; if(is.null(v)) NA else v})),
-      use_curves = 0,
-      stringsAsFactors = FALSE, row.names = NULL
+  } else {
+    p01_df <- tibble(
+      !!market_id := numeric(), !!good_id := character(),
+      p0_in_p1 = numeric(), p1_in_p0 = numeric(), use_curves = numeric(),
+      curve_mon0 = numeric(), curve_mon1 = numeric()
     )
-    names(non_use_df)[1:2] <- c(market_id, good_id)
-    suppressWarnings({
-      non_use_df[[market_id]] <- as.numeric(non_use_df[[market_id]])
-      non_use_df[[good_id]]   <- as.numeric(non_use_df[[good_id]])
-    })
-    mon_p0_col <- paste0("curve_mon_prd", period_0)
-    mon_p1_col <- paste0("curve_mon_prd", period_1)
-    mon_wide <- monotonicity_df %>% select(all_of(c(market_id, good_id, mon_p0_col, mon_p1_col)))
-    non_use_df <- non_use_df %>% left_join(mon_wide, by = c(market_id, good_id))
-    names(non_use_df)[names(non_use_df) == mon_p0_col] <- "curve_mon0"
-    names(non_use_df)[names(non_use_df) == mon_p1_col] <- "curve_mon1"
-    p01_df <- bind_rows(p01_df, non_use_df)
   }
 
   yh_df <- yh_df %>% left_join(p01_df, by = c(market_id, good_id))
 
   smoothed_exp_df <- smoothed_exp_df %>%
-    left_join(smoothed_inc_df, by = c(market_id, "percentile")) %>%
-    left_join(yh_df, by = c(market_id, good_id, "percentile")) %>%
-    left_join(smoothed_df, by = c(market_id, good_id)) %>%
+    left_join(smoothed_inc_df, by = c(market_id, "percentile"))
+
+  smoothed_exp_df <- smoothed_exp_df %>%
+    left_join(yh_df, by = c(market_id, good_id, "percentile"))
+
+  smoothed_exp_df <- smoothed_exp_df %>%
+    left_join(smoothed_df, by = c(market_id, good_id))
+
+  smoothed_exp_df <- smoothed_exp_df %>%
     left_join(num_goods_df, by = c(market_id, group_id))
 
   smoothed_exp_df <- smoothed_exp_df %>%
@@ -726,9 +937,11 @@ plot_bars <- function(dataframe, prcnt_chng_P1, prcnt_chng_P0, title,
     scale_x_continuous(breaks = seq(10, 90, 10))
 
   if (limit_y_axis) {
+    # Use coord_cartesian to clip bars visually (like matplotlib) rather than
+    # scale_y_continuous(limits=...) which removes data outside the range entirely
     plot_obj <- plot_obj +
-      scale_y_continuous(limits = c(y_min, y_max),
-                         breaks = seq(y_min, y_max, y_step_tick))
+      scale_y_continuous(breaks = seq(y_min, y_max, y_step_tick)) +
+      coord_cartesian(ylim = c(y_min, y_max))
   }
 
   print(plot_obj)
