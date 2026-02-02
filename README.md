@@ -1,5 +1,5 @@
 # nonlinearEngelcurves
-Code (available for Python, Stata, and R) to apply the price index and welfare estimation procedure in Atkin, Faber, Fally and Gonzalez-Navarro (2023).
+Code (available for Python, Stata, and R) to apply the price index and welfare estimation procedure in "Measuring Welfare and Inequality with Incomplete Price Information" (with David Atkin, Ben Faber and Marco Gonzalez-Navarro), *Quarterly Journal of Economics*, February 2024.
 
 ### Inputs
 Requires household consumption data that contain expenditures for households on goods $g$ organized into groups $G$. Household consumption data can either be a repeated cross section or panel. Households are ranked according to total expenditure per capita within a given market identifier. 
