@@ -6,6 +6,11 @@ local prcntile_upper = 1-`prcntile_lower'
 local carryforward_numtimes = ceil(`eval_points'*`prcntile_lower')
 display `prcntile_upper'
 
+*** Read AFFG tails toggle from global (default: "N" = original approach)
+local use_affg_tails = "$use_affg_tails"
+if "`use_affg_tails'" == "" local use_affg_tails = "N"
+
+*** Compute signed direction indicators for adjacent differences
 qui gen diff_before = smoothed_exp_share_g-smoothed_exp_share_g[_n-1]
 qui replace diff_before = . if `group_var' != `group_var'[_n-1]
 qui replace diff_before = -1  if diff_before < 0 & !missing(diff_before)
@@ -16,38 +21,107 @@ qui replace diff_after = . if `group_var' != `group_var'[_n+1]
 qui replace diff_after = -1  if diff_after < 0 & !missing(diff_after)
 qui replace diff_after = 1  if diff_after > 0 & !missing(diff_after)
 
-egen diff = rowmean(diff_before diff_after)
-qui gen diffuppernlower = diff if (prcntile < `prcntile_lower') | (prcntile > `prcntile_upper')
-qui egen max_diff = max(diffuppernlower), by(`group_var')
-qui egen min_diff = min(diffuppernlower), by(`group_var')
-qui replace max_diff = 0 if missing(max_diff)
-qui replace min_diff = 0 if missing(min_diff)
-qui gen curve_mon = 0
-qui replace curve_mon = 1 if min_diff > 0
-qui replace curve_mon = -1 if max_diff < 0
 
-qui gen fix = 0
-qui replace fix = 1 if  curve_mon ==1 & diff < 0 & (prcntile < `prcntile_lower' | prcntile > `prcntile_upper') // Logic: if curve is mon. and + (at 5-95 level), then negative differences must be in tails, and we'll highlight these to fix
-qui replace fix = 1 if  curve_mon == -1 & diff > 0 & (prcntile < `prcntile_lower' | prcntile > `prcntile_upper')  // Logic: if curve is mon. and - (at 5-95 level), then positive differences must be in tails, and we'll highlight these to fix
+if "`use_affg_tails'" == "Y" {
+	*** AFFG-style CE preprocessing (TOGGLE: use_affg_tails)
+	*** Checks INTERIOR monotonicity (5-95%) to determine whether/how to clean tails.
 
-forval i = 1/`carryforward_numtimes' {
-	qui replace fix = 1 if fix[_n+1]==1 & prcntile < `prcntile_lower' & `group_var' == `group_var'[_n+1]
-	qui replace fix = 1 if fix[_n-1]==1 & prcntile > `prcntile_upper' & `group_var' == `group_var'[_n-1]
+	*** 1. DGA three-point slope
+	qui gen slope3 = 0
+	qui replace slope3 = 1  if diff_before == 1  & diff_after == 1
+	qui replace slope3 = -1 if diff_before == -1 & diff_after == -1
+	*** Endpoints: use the one available direction
+	qui replace slope3 = diff_after  if missing(diff_before) & !missing(diff_after)
+	qui replace slope3 = diff_before if !missing(diff_before) & missing(diff_after)
+	qui replace slope3 = . if missing(smoothed_exp_share_g)
+
+	*** 2. Interior monotonicity (5-95% range)
+	qui gen slope_int = slope3 if prcntile >= `prcntile_lower' & prcntile <= `prcntile_upper'
+	qui egen max_sl_int = max(slope_int), by(`group_var')
+	qui egen min_sl_int = min(slope_int), by(`group_var')
+	qui replace max_sl_int = 0 if missing(max_sl_int)
+	qui replace min_sl_int = 0 if missing(min_sl_int)
+	qui gen int_mono = 0
+	qui replace int_mono = 1  if max_sl_int == 1  & min_sl_int == 1
+	qui replace int_mono = -1 if max_sl_int == -1 & min_sl_int == -1
+
+	*** Full range monotonicity
+	qui egen max_sl_full = max(slope3), by(`group_var')
+	qui egen min_sl_full = min(slope3), by(`group_var')
+	qui replace max_sl_full = 0 if missing(max_sl_full)
+	qui replace min_sl_full = 0 if missing(min_sl_full)
+	qui gen full_mono = 0
+	qui replace full_mono = 1  if max_sl_full == 1  & min_sl_full == 1
+	qui replace full_mono = -1 if max_sl_full == -1 & min_sl_full == -1
+
+	*** 3. Point-by-point cleaning (only when interior is mono but full isn't)
+	qui gen drop_point = 0
+	qui replace drop_point = 1 if int_mono != 0 & full_mono == 0 ///
+		& slope3 != int_mono ///
+		& !(slope3 == 0 & slope3[_n-1] == int_mono & `group_var' == `group_var'[_n-1]) ///
+		& !(slope3 == 0 & slope3[_n+1] == int_mono & `group_var' == `group_var'[_n+1])
+
+	*** 4. AFFG edge cascade: single-pass check of next/previous 4 cleaned values
+	*** Head (rows 1-5, i.e., prcntile 0.00-0.04):
+	qui replace drop_point = 1 if prcntile < `prcntile_lower' ///
+		& `group_var' == `group_var'[_n+1] ///
+		& (drop_point[_n+1] == 1 | drop_point[_n+2] == 1 | drop_point[_n+3] == 1 | drop_point[_n+4] == 1)
+	*** Tail (rows 97-101, i.e., prcntile 0.96-1.00):
+	qui replace drop_point = 1 if prcntile > `prcntile_upper' ///
+		& `group_var' == `group_var'[_n-1] ///
+		& (drop_point[_n-1] == 1 | drop_point[_n-2] == 1 | drop_point[_n-3] == 1 | drop_point[_n-4] == 1)
+
+	*** Build replacement variable
+	qui gen smoothed_exp_share_g_replace = smoothed_exp_share_g
+	qui replace smoothed_exp_share_g_replace = . if drop_point == 1
+
+	*** 5. Trim first 3 and last 3 percentiles (AFFG always does this)
+	qui replace smoothed_exp_share_g_replace = . if prcntile < 0.03 | prcntile > 0.97
+
+	*** 6. Spline extrapolation on log income
+	by `group_var': mipolate smoothed_exp_share_g_replace log_smoothed_outlays, ///
+		spline epolate gen(smoothed_exp_share_g_int)
+	qui replace smoothed_exp_share_g = smoothed_exp_share_g_int
+
+	*** Clean up
+	qui drop slope3 slope_int max_sl_int min_sl_int int_mono ///
+		max_sl_full min_sl_full full_mono drop_point ///
+		smoothed_exp_share_g_int smoothed_exp_share_g_replace ///
+		diff_before diff_after
 }
+else {
+	*** Original approach: check TAIL direction, fix violating tail points
 
-if "`extrapolate_end'" == "Y" {
-	qui gen smoothed_exp_share_g_replace = smoothed_exp_share_g if (prcntile > 0.02 & prcntile < 0.98) // thibault's always extrapolate at ends
+	egen diff = rowmean(diff_before diff_after)
+	qui gen diffuppernlower = diff if (prcntile < `prcntile_lower') | (prcntile > `prcntile_upper')
+	qui egen max_diff = max(diffuppernlower), by(`group_var')
+	qui egen min_diff = min(diffuppernlower), by(`group_var')
+	qui replace max_diff = 0 if missing(max_diff)
+	qui replace min_diff = 0 if missing(min_diff)
+	qui gen curve_mon = 0
+	qui replace curve_mon = 1 if min_diff > 0
+	qui replace curve_mon = -1 if max_diff < 0
+
+	qui gen fix = 0
+	qui replace fix = 1 if  curve_mon ==1 & diff < 0 & (prcntile < `prcntile_lower' | prcntile > `prcntile_upper') // Logic: if curve is mon. and + (at 5-95 level), then negative differences must be in tails, and we'll highlight these to fix
+	qui replace fix = 1 if  curve_mon == -1 & diff > 0 & (prcntile < `prcntile_lower' | prcntile > `prcntile_upper')  // Logic: if curve is mon. and - (at 5-95 level), then positive differences must be in tails, and we'll highlight these to fix
+
+	forval i = 1/`carryforward_numtimes' {
+		qui replace fix = 1 if fix[_n+1]==1 & prcntile < `prcntile_lower' & `group_var' == `group_var'[_n+1]
+		qui replace fix = 1 if fix[_n-1]==1 & prcntile > `prcntile_upper' & `group_var' == `group_var'[_n-1]
+	}
+
+	if "`extrapolate_end'" == "Y" {
+		qui gen smoothed_exp_share_g_replace = smoothed_exp_share_g if (prcntile > 0.02 & prcntile < 0.98) // thibault's always extrapolate at ends
+	}
+	else{
+		qui gen smoothed_exp_share_g_replace = smoothed_exp_share_g
+	}
+
+	qui replace smoothed_exp_share_g_replace = . if fix == 1
+
+	*** Spline extrapolation of tails
+	by `group_var': mipolate smoothed_exp_share_g_replace log_smoothed_outlays, spline epolate gen(smoothed_exp_share_g_int)
+	qui replace smoothed_exp_share_g = smoothed_exp_share_g_int
+	qui drop max_diff min_diff curve_mon smoothed_exp_share_g_int smoothed_exp_share_g_replace diff diffuppernlower fix diff_before diff_after
 }
-else{
-	qui gen smoothed_exp_share_g_replace = smoothed_exp_share_g 
-}
-
-qui replace smoothed_exp_share_g_replace = . if fix == 1
-
-*** Linear extrapolation of tails
-// qui ipolate smoothed_exp_share_g_replace prcntile, by(`group_var') gen(smoothed_exp_share_g_int) epolate
-*** Spline extrapolation of tails
-by `group_var': mipolate smoothed_exp_share_g_replace log_smoothed_outlays, spline epolate gen(smoothed_exp_share_g_int) // AFFG spline method
-qui replace smoothed_exp_share_g = smoothed_exp_share_g_int
-qui drop max_diff min_diff curve_mon smoothed_exp_share_g_int smoothed_exp_share_g_replace diff diffuppernlower fix diff_before diff_after
-

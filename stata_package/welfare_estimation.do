@@ -26,6 +26,7 @@ local price_indices = "`output_dir'price_indices"
 
 *** Parameters ***
 local infinity          = 999999999
+local censor_epsilon    = 0.000001
 local tails_extrapolation_percentage = 0.05
 local evaluation_points = 100
 *** Price elasticity (sigma=0.7 in AFFG baseline calibration) for exact price correction
@@ -48,10 +49,30 @@ local d_price_var = "dp_prd1_prd0"
 local paralleize = "Y"
 *** Whether to take weighted medians or not, which is pretty slow to run
 local weight_medians = "N"
+*** AFFG Replication Toggles (read from globals, default "N")
+if "$use_affg_tails" != "" {
+	local use_affg_tails = "$use_affg_tails"
+}
+else {
+	local use_affg_tails = "N"
+}
+if "$use_affg_deciles" != "" {
+	local use_affg_deciles = "$use_affg_deciles"
+}
+else {
+	local use_affg_deciles = "N"
+}
 *** Whether we want to eliminate negative consumption shares in tails of monotonic Engel curves with a linear interpolation to zero ("Y" does this)
-local elim_neg_shares = "Y"
-*** Whether user wants to fix consumption shares above one in tails with linear interpolation to 1
-local elim_ab1_shares = "Y"
+*** AFFG does NOT do this — disable when replicating AFFG
+if "`use_affg_tails'" == "Y" {
+	local elim_neg_shares = "N"
+	local elim_ab1_shares = "N"
+}
+else {
+	local elim_neg_shares = "Y"
+	*** Whether user wants to fix consumption shares above one in tails with linear interpolation to 1
+	local elim_ab1_shares = "Y"
+}
 *** Either yes or no for panel
 local panel = "N"
 *** Alternative household percentile specification
@@ -352,6 +373,12 @@ qui replace use_curves_with_yh0 = 0 if abs(yh0) < `infinity'
 qui egen num_gds_p1_overlap_grp = total(use_curves_with_yh0), by(`market_id' `group_id' prcntile)
 drop use_curves_with_yh0 use_curves_with_yh1
 
+*** TOGGLE: use_affg_deciles — evaluate at 9 decile points only (10,20,...,90)
+if "`use_affg_deciles'" == "Y" {
+	gen _decile_check = round(prcntile * 100)
+	keep if inlist(_decile_check, 10, 20, 30, 40, 50, 60, 70, 80, 90)
+	drop _decile_check
+}
 
 if "`panel'" == "Y" {
 	local outlays_var = "`outl_orig'"
@@ -387,14 +414,15 @@ qui gen logP0_ranked = logP0
 qui egen minlogP0 = min(logP0), by(`market_id' prcntile)
 qui egen maxlogP0 = max(logP0), by(`market_id' prcntile)
 *** use_curves == 1 checks for joint-monotonicity & signedness, so can examine slope of only one curve
+*** Epsilon censoring: Sarhan correction assumes censored values lie just beyond observed range
 *** Case 1) Rich households in period 0 have no overlap in period 1 (upper tail higher in 0 than 1), censored from above
-qui replace logP0_ranked = maxlogP0+`infinity' if (use_curves == 1) & (curve_mon1 == 1) & (yh1 >= `infinity')
+qui replace logP0_ranked = maxlogP0+`censor_epsilon' if (use_curves == 1) & (curve_mon1 == 1) & (yh1 >= `infinity')
 *** Case 2)  Poor households in period 0 have no overlap in period 1 (lower tail lower in 0 than 1), censored from below
-qui replace logP0_ranked = minlogP0-`infinity' if (use_curves == 1) & (curve_mon1 == 1) & (yh1 <= -`infinity')
+qui replace logP0_ranked = minlogP0-`censor_epsilon' if (use_curves == 1) & (curve_mon1 == 1) & (yh1 <= -`infinity')
 *** Case 3)  Poor households in period 0 have no overlap in period 1 (upper tail higher in 0 than 1), censored from below
-qui replace logP0_ranked = minlogP0-`infinity' if (use_curves == 1) & (curve_mon1 == -1) & (yh1 >= `infinity')
+qui replace logP0_ranked = minlogP0-`censor_epsilon' if (use_curves == 1) & (curve_mon1 == -1) & (yh1 >= `infinity')
 *** Case 4) Rich households in period 0 have no overlap in period 1 (lower tail lower in 0 than 1), censored from above
-qui replace logP0_ranked = maxlogP0+`infinity' if (use_curves == 1) & (curve_mon1 == -1) & (yh1 <= -`infinity')
+qui replace logP0_ranked = maxlogP0+`censor_epsilon' if (use_curves == 1) & (curve_mon1 == -1) & (yh1 <= -`infinity')
 qui egen logP0_med = median(logP0_ranked), by(`market_id' prcntile)
 *** Check if median exceeds max or min of actual values, if so replace with missing
 qui replace logP0_med = . if logP0_med<(minlogP0) | logP0_med>(maxlogP0)
@@ -433,14 +461,15 @@ qui replace logP1 = . if use_curves != 1
 qui gen logP1_ranked = -1*logP1
 qui egen minlogP1 = min(-1*logP1), by(`market_id' prcntile)
 qui egen maxlogP1 = max(-1*logP1), by(`market_id' prcntile)
+*** Epsilon censoring (same as P0 above, applied to backward direction)
 *** Case 1: Rich households in period 1 have no overlap in period 0 (upper tail higher in 1 than 0), censored from below
-qui replace logP1_ranked = minlogP1-`infinity' if (use_curves == 1) & (curve_mon0 == 1) & (yh0 >= `infinity')
+qui replace logP1_ranked = minlogP1-`censor_epsilon' if (use_curves == 1) & (curve_mon0 == 1) & (yh0 >= `infinity')
 *** Case 2: Poor households in period 1 have no overlap in period 0 (lower tail lower in 1 than 0), censored from above
-qui replace logP1_ranked = maxlogP1+`infinity' if (use_curves == 1) & (curve_mon0 == 1) & (yh0 <= -`infinity')
+qui replace logP1_ranked = maxlogP1+`censor_epsilon' if (use_curves == 1) & (curve_mon0 == 1) & (yh0 <= -`infinity')
 *** Case 3: Poor households in period 1 have no overlap in period 0 (upper tail higher in 1 than 0), censored from above
-qui replace logP1_ranked = maxlogP1+`infinity' if (use_curves == 1) & (curve_mon0 == -1) & (yh0 >= `infinity')
+qui replace logP1_ranked = maxlogP1+`censor_epsilon' if (use_curves == 1) & (curve_mon0 == -1) & (yh0 >= `infinity')
 *** Case 4: Rich households in period 1 have no overlap in period 0 (lower tail lower in 1 than 0), censored from below
-qui replace logP1_ranked = minlogP1-`infinity' if (use_curves == 1) & (curve_mon0 == -1) & (yh0 <= -`infinity')
+qui replace logP1_ranked = minlogP1-`censor_epsilon' if (use_curves == 1) & (curve_mon0 == -1) & (yh0 <= -`infinity')
 qui egen logP1_med = median(logP1_ranked), by(`market_id' prcntile)
 qui replace logP1_med = . if logP1_med<(minlogP1) | logP1_med>(maxlogP1)
 if "`weight_medians'" == "Y" {

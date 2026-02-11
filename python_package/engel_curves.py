@@ -82,7 +82,125 @@ def return_sign(number):
         return 1
     else: return 0
 
-def monotonicity_tails(a, evl_grid, evl_points, prcntl=0.05,extrapolate_end=False,type_extrapolation="spline",log_income=None):
+def monotonicity_tails(a, evl_grid, evl_points, prcntl=0.05,extrapolate_end=False,type_extrapolation="spline",log_income=None,use_affg_tails=False):
+    # Use log income as x-variable for spline if provided (budget shares are
+    # functions of expenditure, not percentile rank — splining on log income
+    # preserves the economic relationship and avoids distortion at tails)
+    x_var = log_income if log_income is not None else evl_grid
+
+    if use_affg_tails:
+        return _monotonicity_tails_affg(a, evl_grid, evl_points, prcntl, x_var)
+    else:
+        return _monotonicity_tails_original(a, evl_grid, evl_points, prcntl, extrapolate_end, type_extrapolation, x_var)
+
+
+def _monotonicity_tails_affg(a, evl_grid, evl_points, prcntl, x_var):
+    """AFFG-style CE preprocessing: interior monotonicity check + point cleaning + edge cascade + trim."""
+    critical_val = int(np.round(evl_points * prcntl))
+    n = len(a)
+
+    # 1. Three-point slope
+    diffs_raw = a[1:] - a[:-1]
+    diffs_sign = np.array([return_sign(d) for d in diffs_raw])
+
+    slope3 = np.zeros(n)
+    for i in range(n):
+        if np.isnan(a[i]):
+            slope3[i] = np.nan
+            continue
+        if i == 0:
+            # First point: one-sided (forward)
+            if i < len(diffs_sign):
+                slope3[i] = diffs_sign[i]
+        elif i == n - 1:
+            # Last point: one-sided (backward)
+            slope3[i] = diffs_sign[i - 1]
+        else:
+            db = diffs_sign[i - 1]
+            da = diffs_sign[i]
+            if db == 1 and da == 1:
+                slope3[i] = 1
+            elif db == -1 and da == -1:
+                slope3[i] = -1
+            else:
+                slope3[i] = 0
+
+    # 2. Interior monotonicity (prcntl to 1-prcntl range)
+    prcntile_lower = prcntl
+    prcntile_upper = 1 - prcntl
+    int_mask = (evl_grid >= prcntile_lower) & (evl_grid <= prcntile_upper) & ~np.isnan(slope3)
+    if int_mask.any():
+        slope_int = slope3[int_mask]
+        max_sl_int = np.max(slope_int) if len(slope_int) > 0 else 0
+        min_sl_int = np.min(slope_int) if len(slope_int) > 0 else 0
+    else:
+        max_sl_int, min_sl_int = 0, 0
+
+    int_mono = 0
+    if max_sl_int == 1 and min_sl_int == 1:
+        int_mono = 1
+    elif max_sl_int == -1 and min_sl_int == -1:
+        int_mono = -1
+
+    # Full range monotonicity
+    valid_slopes = slope3[~np.isnan(slope3)]
+    if len(valid_slopes) > 0:
+        max_sl_full = np.max(valid_slopes)
+        min_sl_full = np.min(valid_slopes)
+    else:
+        max_sl_full, min_sl_full = 0, 0
+
+    full_mono = 0
+    if max_sl_full == 1 and min_sl_full == 1:
+        full_mono = 1
+    elif max_sl_full == -1 and min_sl_full == -1:
+        full_mono = -1
+
+    # 3. Point-by-point cleaning
+    drop_point = np.zeros(n, dtype=bool)
+    if int_mono != 0 and full_mono == 0:
+        for i in range(n):
+            if np.isnan(slope3[i]):
+                continue
+            if slope3[i] == int_mono:
+                continue
+            # Check if neighbor agrees (zero-slope exemption)
+            if slope3[i] == 0:
+                if i > 0 and slope3[i - 1] == int_mono:
+                    continue
+                if i < n - 1 and slope3[i + 1] == int_mono:
+                    continue
+            drop_point[i] = True
+
+    # 4. Edge cascade (single-pass)
+    orig_drop = drop_point.copy()
+    for i in range(n):
+        if evl_grid[i] < prcntile_lower and i < n - 1:
+            if any(orig_drop[i + 1:min(i + 5, n)]):
+                drop_point[i] = True
+    for i in range(n - 1, -1, -1):
+        if evl_grid[i] > prcntile_upper and i > 0:
+            if any(orig_drop[max(i - 4, 0):i]):
+                drop_point[i] = True
+
+    # 5. Build replacement array
+    a_replace = a.copy()
+    a_replace[drop_point] = np.nan
+
+    # 6. Trim first 3 and last 3 percentiles
+    a_replace[evl_grid < 0.03] = np.nan
+    a_replace[evl_grid > 0.97] = np.nan
+
+    # 7. Spline extrapolation on x_var
+    valid = ~np.isnan(a_replace)
+    if valid.sum() < 2:
+        return a
+    f = CubicSpline(x_var[valid], a_replace[valid], bc_type='natural')
+    return f(x_var)
+
+
+def _monotonicity_tails_original(a, evl_grid, evl_points, prcntl, extrapolate_end, type_extrapolation, x_var):
+    """Original approach: check tail direction, fix violating tail points."""
     critical_val     = int(np.round(evl_points*prcntl))
     diffs            = a[1:]-a[:-1]
     diffs            = [return_sign(diff) for diff in diffs]
@@ -110,7 +228,7 @@ def monotonicity_tails(a, evl_grid, evl_points, prcntl=0.05,extrapolate_end=Fals
                 last_fix_upper = i
     else:
         pass
-    
+
     ### Remove NaNs from list
     non_nan_indices = np.argwhere(~np.isnan(a)).flatten()
     if len(non_nan_indices) == 0:
@@ -146,11 +264,6 @@ def monotonicity_tails(a, evl_grid, evl_points, prcntl=0.05,extrapolate_end=Fals
 
     if str(last_fix_lower) == 'nan': last_fix_lower = 0
     if str(last_fix_upper) == 'nan': last_fix_upper = 0
-
-    # Use log income as x-variable for spline if provided (budget shares are
-    # functions of expenditure, not percentile rank — splining on log income
-    # preserves the economic relationship and avoids distortion at tails)
-    x_var = log_income if log_income is not None else evl_grid
 
     if str(last_fix_upper) == '0':
         if type_extrapolation=="spline":
@@ -664,7 +777,8 @@ def identify_horizontal_shifts(smoothed_exp_dict, smoothed_inc_dict, monotonicit
 def gen_welfare_df(smoothed_inc_dict,smoothed_exp_dict,smoothed_df,
                    yh0_dict,yh1_dict, p0_in_p1_dict,p1_in_p0_dict,
                    use_curves_dict,num_gds_dict, monotonicity_dict, evl_grid, evl_points,
-                   hh_id, market_id,good_id,group_id,period_id,period_0, period_1, panel=False):
+                   hh_id, market_id,good_id,group_id,period_id,period_0, period_1, panel=False,
+                   filter_to_deciles=False):
     if not panel:
         smoothed_df = pd.pivot_table(smoothed_df, index=[market_id,good_id,group_id],columns=period_id, values=['num_households_mkt','wt_mkt_prd'])
         smoothed_df = smoothed_df.reset_index()
@@ -732,8 +846,13 @@ def gen_welfare_df(smoothed_inc_dict,smoothed_exp_dict,smoothed_df,
         smoothed_df = smoothed_df.merge(rank_df, on=[hh_id,market_id], how='left')
     else:
         smoothed_df['percentile'] = smoothed_df['percentile']/float(evl_points)
+
+    if filter_to_deciles and not panel:
+        decile_values = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+        smoothed_df = smoothed_df[smoothed_df['percentile'].round(2).isin(decile_values)].copy()
+
     return smoothed_df
-    
+
 def identify_non_crossings(dataframe,p0_or_p1,amt_to_add=0.0001):
     # Only assign censored values for goods passing the monotonicity filter
     if dataframe['use_curves'] != 1:

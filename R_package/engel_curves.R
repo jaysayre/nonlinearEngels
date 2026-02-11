@@ -97,7 +97,127 @@ return_sign <- function(number) {
 monotonicity_tails <- function(a, evl_grid, evl_points, prcntl = 0.05,
                                extrapolate_end = FALSE,
                                type_extrapolation = "spline",
-                               log_income = NULL) {
+                               log_income = NULL,
+                               use_affg_tails = FALSE) {
+  # Use log income as x-variable for spline if provided
+  x_var <- if (!is.null(log_income)) log_income else evl_grid
+
+  if (use_affg_tails) {
+    return(monotonicity_tails_affg(a, evl_grid, evl_points, prcntl, x_var))
+  } else {
+    return(monotonicity_tails_original(a, evl_grid, evl_points, prcntl,
+                                        extrapolate_end, type_extrapolation, x_var))
+  }
+}
+
+monotonicity_tails_affg <- function(a, evl_grid, evl_points, prcntl, x_var) {
+  # AFFG-style CE preprocessing: interior monotonicity check + point cleaning + edge cascade + trim
+  critical_val <- as.integer(round(evl_points * prcntl))
+  n <- length(a)
+  prcntile_lower <- prcntl
+  prcntile_upper <- 1 - prcntl
+
+  # 1. Three-point slope
+  raw_diffs  <- a[2:n] - a[1:(n - 1)]
+  diffs_sign <- sapply(raw_diffs, return_sign)
+
+  slope3 <- numeric(n)
+  for (i in seq_len(n)) {
+    if (is.na(a[i])) {
+      slope3[i] <- NA_real_
+      next
+    }
+    if (i == 1) {
+      slope3[i] <- diffs_sign[1]
+    } else if (i == n) {
+      slope3[i] <- diffs_sign[n - 1]
+    } else {
+      db <- diffs_sign[i - 1]
+      da <- diffs_sign[i]
+      if (db == 1 && da == 1) {
+        slope3[i] <- 1
+      } else if (db == -1 && da == -1) {
+        slope3[i] <- -1
+      } else {
+        slope3[i] <- 0
+      }
+    }
+  }
+
+  # 2. Interior monotonicity (prcntl to 1-prcntl range)
+  int_mask <- (evl_grid >= prcntile_lower) & (evl_grid <= prcntile_upper) & !is.na(slope3)
+  if (any(int_mask)) {
+    slope_int <- slope3[int_mask]
+    max_sl_int <- max(slope_int)
+    min_sl_int <- min(slope_int)
+  } else {
+    max_sl_int <- 0
+    min_sl_int <- 0
+  }
+
+  int_mono <- 0
+  if (max_sl_int == 1 && min_sl_int == 1) int_mono <- 1
+  if (max_sl_int == -1 && min_sl_int == -1) int_mono <- -1
+
+  # Full range monotonicity
+  valid_slopes <- slope3[!is.na(slope3)]
+  if (length(valid_slopes) > 0) {
+    max_sl_full <- max(valid_slopes)
+    min_sl_full <- min(valid_slopes)
+  } else {
+    max_sl_full <- 0
+    min_sl_full <- 0
+  }
+  full_mono <- 0
+  if (max_sl_full == 1 && min_sl_full == 1) full_mono <- 1
+  if (max_sl_full == -1 && min_sl_full == -1) full_mono <- -1
+
+  # 3. Point-by-point cleaning
+  drop_point <- rep(FALSE, n)
+  if (int_mono != 0 && full_mono == 0) {
+    for (i in seq_len(n)) {
+      if (is.na(slope3[i])) next
+      if (slope3[i] == int_mono) next
+      # Zero-slope exemption
+      if (slope3[i] == 0) {
+        if (i > 1 && !is.na(slope3[i - 1]) && slope3[i - 1] == int_mono) next
+        if (i < n && !is.na(slope3[i + 1]) && slope3[i + 1] == int_mono) next
+      }
+      drop_point[i] <- TRUE
+    }
+  }
+
+  # 4. Edge cascade (single-pass)
+  orig_drop <- drop_point
+  for (i in seq_len(n)) {
+    if (evl_grid[i] < prcntile_lower && i < n) {
+      if (any(orig_drop[(i + 1):min(i + 4, n)])) drop_point[i] <- TRUE
+    }
+  }
+  for (i in seq(n, 1)) {
+    if (evl_grid[i] > prcntile_upper && i > 1) {
+      if (any(orig_drop[max(i - 4, 1):(i - 1)])) drop_point[i] <- TRUE
+    }
+  }
+
+  # 5. Build replacement array
+  a_replace <- a
+  a_replace[drop_point] <- NA_real_
+
+  # 6. Trim first 3 and last 3 percentiles
+  a_replace[evl_grid < 0.03] <- NA_real_
+  a_replace[evl_grid > 0.97] <- NA_real_
+
+  # 7. Spline extrapolation on x_var
+  valid <- !is.na(a_replace)
+  if (sum(valid) < 2) return(a)
+  f <- splinefun(x_var[valid], a_replace[valid], method = "natural")
+  f(x_var)
+}
+
+monotonicity_tails_original <- function(a, evl_grid, evl_points, prcntl,
+                                         extrapolate_end, type_extrapolation, x_var) {
+  # Original approach: check tail direction, fix violating tail points
   critical_val <- as.integer(round(evl_points * prcntl))
 
   # Compute forward diffs and their signs
@@ -176,19 +296,12 @@ monotonicity_tails <- function(a, evl_grid, evl_points, prcntl = 0.05,
   if (is.na(last_fix_upper)) last_fix_upper <- 0
 
   # Build interpolation on the trimmed interior (1-indexed)
-  # Python: evl_grid[last_fix_lower:] means starting from index last_fix_lower (0-based)
-  # In R 1-based: start at last_fix_lower + 1
   lo <- last_fix_lower + 1
   if (last_fix_upper == 0) {
     hi <- length(a)
   } else {
     hi <- length(a) - last_fix_upper
   }
-
-  # Use log income as x-variable for spline if provided (budget shares are
-  # functions of expenditure, not percentile rank — splining on log income
-  # preserves the economic relationship and avoids distortion at tails)
-  x_var <- if (!is.null(log_income)) log_income else evl_grid
 
   x_interior <- x_var[lo:hi]
   a_interior <- a[lo:hi]
@@ -198,8 +311,7 @@ monotonicity_tails <- function(a, evl_grid, evl_points, prcntl = 0.05,
     return(f(x_var))
   }
 
-  # Linear interpolation with linear extrapolation (matching Python's
-  # interp1d(..., fill_value='extrapolate'))
+  # Linear interpolation with linear extrapolation
   f_interp <- approxfun(x_interior, a_interior, rule = 2)
   result <- f_interp(x_var)
   n_int <- length(x_interior)
@@ -755,7 +867,8 @@ gen_welfare_df <- function(smoothed_inc_dict, smoothed_exp_dict, smoothed_df,
                            yh0_dict, yh1_dict, p0_in_p1_dict, p1_in_p0_dict,
                            use_curves_dict, num_gds_dict, monotonicity_dict,
                            evl_grid, evl_points, market_id, good_id, group_id,
-                           period_id, period_0, period_1) {
+                           period_id, period_0, period_1,
+                           filter_to_deciles = FALSE) {
 
   # Pivot smoothed_df wider on period (select only needed columns first, matching Python)
   smoothed_df <- smoothed_df %>%
@@ -887,6 +1000,12 @@ gen_welfare_df <- function(smoothed_inc_dict, smoothed_exp_dict, smoothed_df,
 
   smoothed_exp_df <- create_identifier(smoothed_exp_df, c(market_id, group_id, good_id), "mkt_good")
   smoothed_exp_df$percentile <- smoothed_exp_df$percentile / evl_points
+
+  if (filter_to_deciles) {
+    decile_values <- c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9)
+    smoothed_exp_df <- smoothed_exp_df %>%
+      filter(round(percentile, 2) %in% decile_values)
+  }
 
   smoothed_exp_df
 }
