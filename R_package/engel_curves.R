@@ -96,7 +96,8 @@ return_sign <- function(number) {
 # ── Monotonicity tails ──────────────────────────────────────────────────────
 monotonicity_tails <- function(a, evl_grid, evl_points, prcntl = 0.05,
                                extrapolate_end = FALSE,
-                               type_extrapolation = "spline") {
+                               type_extrapolation = "spline",
+                               log_income = NULL) {
   critical_val <- as.integer(round(evl_points * prcntl))
 
   # Compute forward diffs and their signs
@@ -184,26 +185,31 @@ monotonicity_tails <- function(a, evl_grid, evl_points, prcntl = 0.05,
     hi <- length(a) - last_fix_upper
   }
 
-  x_interior <- evl_grid[lo:hi]
+  # Use log income as x-variable for spline if provided (budget shares are
+  # functions of expenditure, not percentile rank — splining on log income
+  # preserves the economic relationship and avoids distortion at tails)
+  x_var <- if (!is.null(log_income)) log_income else evl_grid
+
+  x_interior <- x_var[lo:hi]
   a_interior <- a[lo:hi]
 
   if (type_extrapolation == "spline") {
     f <- splinefun(x_interior, a_interior, method = "natural")
-    return(f(evl_grid))
+    return(f(x_var))
   }
 
   # Linear interpolation with linear extrapolation (matching Python's
   # interp1d(..., fill_value='extrapolate'))
   f_interp <- approxfun(x_interior, a_interior, rule = 2)
-  result <- f_interp(evl_grid)
+  result <- f_interp(x_var)
   n_int <- length(x_interior)
   slope_lo <- (a_interior[2] - a_interior[1]) / (x_interior[2] - x_interior[1])
   slope_hi <- (a_interior[n_int] - a_interior[n_int - 1]) /
               (x_interior[n_int] - x_interior[n_int - 1])
-  below <- evl_grid < x_interior[1]
-  above <- evl_grid > x_interior[n_int]
-  result[below] <- a_interior[1] + slope_lo * (evl_grid[below] - x_interior[1])
-  result[above] <- a_interior[n_int] + slope_hi * (evl_grid[above] - x_interior[n_int])
+  below <- x_var < x_interior[1]
+  above <- x_var > x_interior[n_int]
+  result[below] <- a_interior[1] + slope_lo * (x_var[below] - x_interior[1])
+  result[above] <- a_interior[n_int] + slope_hi * (x_var[above] - x_interior[n_int])
   result
 }
 
@@ -887,6 +893,10 @@ gen_welfare_df <- function(smoothed_inc_dict, smoothed_exp_dict, smoothed_df,
 
 # ── Identify non-crossings ──────────────────────────────────────────────────
 identify_non_crossings <- function(row, p0_or_p1, amt_to_add = 0.0001) {
+  # Only assign censored values for goods passing the monotonicity filter
+  if (is.na(row[["use_curves"]]) || row[["use_curves"]] != 1) {
+    if (p0_or_p1 == "P0") return(row[["logP0_ranked"]]) else return(row[["logP1_ranked"]])
+  }
   if (p0_or_p1 == "P0") {
     if (row[["curve_mon1"]] == 1 && is.infinite(row[["yh1"]]) && row[["yh1"]] > 0)
       return(row[["maxlogP0"]] + amt_to_add)

@@ -62,7 +62,7 @@ program monotonicity_id
 		*** To get rid of negative expenditure shares at right end of distribution
 		qui gen interpolate_top = 0
 		qui replace interpolate_top = 1 if (max_share > 1) & (min_diff > 0)
-		qui replace `exp_share_var' = . if (`exp_share_var' >=1 0) & (interpolate_top == 1)
+		qui replace `exp_share_var' = . if (`exp_share_var' >= 1) & (interpolate_top == 1)
 		qui replace `exp_share_var' = 1 if (prcntile == 1) & (interpolate_top == 1)
 		qui by `group_var': ipolate `exp_share_var' prcntile, generate(`exp_share_var'_int)
 		qui replace `exp_share_var' = `exp_share_var'_int if (missing(`exp_share_var')) & ( interpolate_top == 1)

@@ -230,15 +230,18 @@ if (compute_welfare) {
   }
 
   # Helper to run monotonicity + tails on a smoothed_exp dict
-  apply_monotonicity <- function(sexp) {
+  apply_monotonicity <- function(sexp, sinc) {
     mon_dict <- list()
     for (key in names(sexp)) {
+      parts   <- strsplit(key, "_")[[1]]
+      inc_key <- paste0(parts[1], "_", parts[2])
       sexp[[key]] <- monotonicity_tails(
         sexp[[key]],
         extrapolate_end    = extrapolate_tails,
         evl_grid           = eval_grid,
         evl_points         = evaluation_points,
-        type_extrapolation = type_extrap_tails
+        type_extrapolation = type_extrap_tails,
+        log_income         = sinc[[inc_key]]
       )
       if (delete_neg_exp_shares) {
         sexp[[key]] <- replace_neg_exp_shares(sexp[[key]], evl_grid = eval_grid)
@@ -267,7 +270,7 @@ if (compute_welfare) {
 
     # Pass 1: adjusted period 0 curves -> extract yh1 for logP0
     message("=== Checking monotonicity (pass 1: for P0) ===")
-    res_p0 <- apply_monotonicity(smoothed_exp_for_p0)
+    res_p0 <- apply_monotonicity(smoothed_exp_for_p0, smoothed_inc)
     smoothed_exp_for_p0  <- res_p0$sexp
     monotonicity_dict_p0 <- res_p0$mon_dict
 
@@ -280,7 +283,7 @@ if (compute_welfare) {
 
     # Pass 2: adjusted period 1 curves -> extract yh0 for logP1
     message("=== Checking monotonicity (pass 2: for P1) ===")
-    res_p1 <- apply_monotonicity(smoothed_exp_for_p1)
+    res_p1 <- apply_monotonicity(smoothed_exp_for_p1, smoothed_inc)
     smoothed_exp_for_p1  <- res_p1$sexp
     monotonicity_dict_p1 <- res_p1$mon_dict
 
@@ -306,13 +309,13 @@ if (compute_welfare) {
 
     # Use unadjusted smoothed_exp for the final monotonicity_dict
     message("=== Checking monotonicity (unadjusted curves for welfare df) ===")
-    res_unadj <- apply_monotonicity(smoothed_exp)
+    res_unadj <- apply_monotonicity(smoothed_exp, smoothed_inc)
     smoothed_exp      <- res_unadj$sexp
     monotonicity_dict <- res_unadj$mon_dict
 
   } else {
     message("=== Checking monotonicity ===")
-    res <- apply_monotonicity(smoothed_exp)
+    res <- apply_monotonicity(smoothed_exp, smoothed_inc)
     smoothed_exp      <- res$sexp
     monotonicity_dict <- res$mon_dict
 
@@ -457,18 +460,18 @@ if (compute_welfare) {
   amt_to_add <- 0.0001
 
   welfare_df$logP0_ranked <- dplyr::case_when(
-    welfare_df$curve_mon1 ==  1 & is.infinite(welfare_df$yh1) & welfare_df$yh1 > 0 ~ welfare_df$maxlogP0 + amt_to_add,
-    welfare_df$curve_mon1 ==  1 & is.infinite(welfare_df$yh1) & welfare_df$yh1 < 0 ~ welfare_df$minlogP0 - amt_to_add,
-    welfare_df$curve_mon1 == -1 & is.infinite(welfare_df$yh1) & welfare_df$yh1 > 0 ~ welfare_df$minlogP0 - amt_to_add,
-    welfare_df$curve_mon1 == -1 & is.infinite(welfare_df$yh1) & welfare_df$yh1 < 0 ~ welfare_df$maxlogP0 + amt_to_add,
+    welfare_df$use_curves == 1 & welfare_df$curve_mon1 ==  1 & is.infinite(welfare_df$yh1) & welfare_df$yh1 > 0 ~ welfare_df$maxlogP0 + amt_to_add,
+    welfare_df$use_curves == 1 & welfare_df$curve_mon1 ==  1 & is.infinite(welfare_df$yh1) & welfare_df$yh1 < 0 ~ welfare_df$minlogP0 - amt_to_add,
+    welfare_df$use_curves == 1 & welfare_df$curve_mon1 == -1 & is.infinite(welfare_df$yh1) & welfare_df$yh1 > 0 ~ welfare_df$minlogP0 - amt_to_add,
+    welfare_df$use_curves == 1 & welfare_df$curve_mon1 == -1 & is.infinite(welfare_df$yh1) & welfare_df$yh1 < 0 ~ welfare_df$maxlogP0 + amt_to_add,
     TRUE ~ welfare_df$logP0_ranked
   )
 
   welfare_df$logP1_ranked <- dplyr::case_when(
-    welfare_df$curve_mon0 ==  1 & is.infinite(welfare_df$yh0) & welfare_df$yh0 > 0 ~ welfare_df$minlogP1 - amt_to_add,
-    welfare_df$curve_mon0 ==  1 & is.infinite(welfare_df$yh0) & welfare_df$yh0 < 0 ~ welfare_df$maxlogP1 + amt_to_add,
-    welfare_df$curve_mon0 == -1 & is.infinite(welfare_df$yh0) & welfare_df$yh0 > 0 ~ welfare_df$maxlogP1 + amt_to_add,
-    welfare_df$curve_mon0 == -1 & is.infinite(welfare_df$yh0) & welfare_df$yh0 < 0 ~ welfare_df$minlogP1 - amt_to_add,
+    welfare_df$use_curves == 1 & welfare_df$curve_mon0 ==  1 & is.infinite(welfare_df$yh0) & welfare_df$yh0 > 0 ~ welfare_df$minlogP1 - amt_to_add,
+    welfare_df$use_curves == 1 & welfare_df$curve_mon0 ==  1 & is.infinite(welfare_df$yh0) & welfare_df$yh0 < 0 ~ welfare_df$maxlogP1 + amt_to_add,
+    welfare_df$use_curves == 1 & welfare_df$curve_mon0 == -1 & is.infinite(welfare_df$yh0) & welfare_df$yh0 > 0 ~ welfare_df$maxlogP1 + amt_to_add,
+    welfare_df$use_curves == 1 & welfare_df$curve_mon0 == -1 & is.infinite(welfare_df$yh0) & welfare_df$yh0 < 0 ~ welfare_df$minlogP1 - amt_to_add,
     TRUE ~ welfare_df$logP1_ranked
   )
 

@@ -270,12 +270,12 @@ if "`panel'" == "Y" {
 	
 	*** Compute how much of period 0 Engel curve contained in period 1 curve
 	gen p0_in_p1 = 1/(`evaluation_points'+1) if missing(`hh_id')
-	replace p0_in_p1 = 0 if abs(yh1) == `infinity'
+	replace p0_in_p1 = 0 if abs(yh1) >= `infinity'
 	egen percent_p0_in_p1 = total(p0_in_p1), by(mkt_good)
 
 	*** Compute how much of period 1 Engel curve contained in period 0 curve
 	gen p1_in_p0 = 1/(`evaluation_points'+1) if missing(`hh_id')
-	replace p1_in_p0 = 0 if abs(yh0) == `infinity'
+	replace p1_in_p0 = 0 if abs(yh0) >= `infinity'
 	egen percent_p1_in_p0 = total(p1_in_p0), by(mkt_good)
 	
 	*** This drops observations which are really just smoothed exp_shares, not hh obs.
@@ -307,12 +307,12 @@ else {
 	
 	*** Compute how much of period 0 Engel curve contained in period 1 curve
 	gen p0_in_p1 = 1/(`evaluation_points'+1)
-	replace p0_in_p1 = 0 if abs(yh1) == `infinity'
+	replace p0_in_p1 = 0 if abs(yh1) >= `infinity'
 	egen percent_p0_in_p1 = total(p0_in_p1), by(mkt_good)
 
 	*** Compute how much of period 1 Engel curve contained in period 0 curve
 	gen p1_in_p0 = 1/(`evaluation_points'+1)
-	replace p1_in_p0 = 0 if abs(yh0) == `infinity'
+	replace p1_in_p0 = 0 if abs(yh0) >= `infinity'
 	egen percent_p1_in_p0 = total(p1_in_p0), by(mkt_good)
 	drop p0_in_p1 p1_in_p0
 }
@@ -345,10 +345,10 @@ qui replace use_curves = 1 if (curve_mon0 == curve_mon1) & (curve_mon0 == -1)
 *** use_curves constant by market-group-good-percentile so simply taking total
 qui egen num_useable_goods_group = total(use_curves), by(`market_id' `group_id' prcntile)
 qui gen use_curves_with_yh1 = use_curves
-qui replace use_curves_with_yh1 = 0 if abs(yh1) != `infinity'
+qui replace use_curves_with_yh1 = 0 if abs(yh1) < `infinity'
 qui egen num_gds_p0_overlap_grp = total(use_curves_with_yh1), by(`market_id' `group_id' prcntile)
 qui gen use_curves_with_yh0 = use_curves
-qui replace use_curves_with_yh0 = 0 if abs(yh0) != `infinity'
+qui replace use_curves_with_yh0 = 0 if abs(yh0) < `infinity'
 qui egen num_gds_p1_overlap_grp = total(use_curves_with_yh0), by(`market_id' `group_id' prcntile)
 drop use_curves_with_yh0 use_curves_with_yh1
 
@@ -388,13 +388,13 @@ qui egen minlogP0 = min(logP0), by(`market_id' prcntile)
 qui egen maxlogP0 = max(logP0), by(`market_id' prcntile)
 *** use_curves == 1 checks for joint-monotonicity & signedness, so can examine slope of only one curve
 *** Case 1) Rich households in period 0 have no overlap in period 1 (upper tail higher in 0 than 1), censored from above
-qui replace logP0_ranked = maxlogP0+`infinity' if (curve_mon1 == 1) & (yh1 == `infinity')
+qui replace logP0_ranked = maxlogP0+`infinity' if (use_curves == 1) & (curve_mon1 == 1) & (yh1 >= `infinity')
 *** Case 2)  Poor households in period 0 have no overlap in period 1 (lower tail lower in 0 than 1), censored from below
-qui replace logP0_ranked = minlogP0-`infinity' if (curve_mon1 == 1) & (yh1 == -`infinity')
+qui replace logP0_ranked = minlogP0-`infinity' if (use_curves == 1) & (curve_mon1 == 1) & (yh1 <= -`infinity')
 *** Case 3)  Poor households in period 0 have no overlap in period 1 (upper tail higher in 0 than 1), censored from below
-qui replace logP0_ranked = minlogP0-`infinity' if (curve_mon1 == -1) & (yh1 == `infinity')
+qui replace logP0_ranked = minlogP0-`infinity' if (use_curves == 1) & (curve_mon1 == -1) & (yh1 >= `infinity')
 *** Case 4) Rich households in period 0 have no overlap in period 1 (lower tail lower in 0 than 1), censored from above
-qui replace logP0_ranked = maxlogP0+`infinity' if (curve_mon1 == -1) & (yh1 == -`infinity')
+qui replace logP0_ranked = maxlogP0+`infinity' if (use_curves == 1) & (curve_mon1 == -1) & (yh1 <= -`infinity')
 qui egen logP0_med = median(logP0_ranked), by(`market_id' prcntile)
 *** Check if median exceeds max or min of actual values, if so replace with missing
 qui replace logP0_med = . if logP0_med<(minlogP0) | logP0_med>(maxlogP0)
@@ -434,13 +434,13 @@ qui gen logP1_ranked = -1*logP1
 qui egen minlogP1 = min(-1*logP1), by(`market_id' prcntile)
 qui egen maxlogP1 = max(-1*logP1), by(`market_id' prcntile)
 *** Case 1: Rich households in period 1 have no overlap in period 0 (upper tail higher in 1 than 0), censored from below
-qui replace logP1_ranked = minlogP1-`infinity' if (curve_mon0 == 1) & (yh0 == `infinity')
+qui replace logP1_ranked = minlogP1-`infinity' if (use_curves == 1) & (curve_mon0 == 1) & (yh0 >= `infinity')
 *** Case 2: Poor households in period 1 have no overlap in period 0 (lower tail lower in 1 than 0), censored from above
-qui replace logP1_ranked = maxlogP1+`infinity' if (curve_mon0 == 1) & (yh0 == -`infinity')
+qui replace logP1_ranked = maxlogP1+`infinity' if (use_curves == 1) & (curve_mon0 == 1) & (yh0 <= -`infinity')
 *** Case 3: Poor households in period 1 have no overlap in period 0 (upper tail higher in 1 than 0), censored from above
-qui replace logP1_ranked = maxlogP1+`infinity' if (curve_mon0 == -1) & (yh0 == `infinity')
+qui replace logP1_ranked = maxlogP1+`infinity' if (use_curves == 1) & (curve_mon0 == -1) & (yh0 >= `infinity')
 *** Case 4: Rich households in period 1 have no overlap in period 0 (lower tail lower in 1 than 0), censored from below
-qui replace logP1_ranked = minlogP1-`infinity' if (curve_mon0 == -1) & (yh0 == -`infinity')
+qui replace logP1_ranked = minlogP1-`infinity' if (use_curves == 1) & (curve_mon0 == -1) & (yh0 <= -`infinity')
 qui egen logP1_med = median(logP1_ranked), by(`market_id' prcntile)
 qui replace logP1_med = . if logP1_med<(minlogP1) | logP1_med>(maxlogP1)
 if "`weight_medians'" == "Y" {

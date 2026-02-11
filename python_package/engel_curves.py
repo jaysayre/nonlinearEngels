@@ -82,7 +82,7 @@ def return_sign(number):
         return 1
     else: return 0
 
-def monotonicity_tails(a, evl_grid, evl_points, prcntl=0.05,extrapolate_end=False,type_extrapolation="spline"):
+def monotonicity_tails(a, evl_grid, evl_points, prcntl=0.05,extrapolate_end=False,type_extrapolation="spline",log_income=None):
     critical_val     = int(np.round(evl_points*prcntl))
     diffs            = a[1:]-a[:-1]
     diffs            = [return_sign(diff) for diff in diffs]
@@ -147,17 +147,22 @@ def monotonicity_tails(a, evl_grid, evl_points, prcntl=0.05,extrapolate_end=Fals
     if str(last_fix_lower) == 'nan': last_fix_lower = 0
     if str(last_fix_upper) == 'nan': last_fix_upper = 0
 
+    # Use log income as x-variable for spline if provided (budget shares are
+    # functions of expenditure, not percentile rank — splining on log income
+    # preserves the economic relationship and avoids distortion at tails)
+    x_var = log_income if log_income is not None else evl_grid
+
     if str(last_fix_upper) == '0':
-        if type_extrapolation=="spline":	
-            f = CubicSpline(evl_grid[last_fix_lower:], a[last_fix_lower:],bc_type='natural')
+        if type_extrapolation=="spline":
+            f = CubicSpline(x_var[last_fix_lower:], a[last_fix_lower:],bc_type='natural')
         else:
-            f = interp1d(evl_grid[last_fix_lower:], a[last_fix_lower:], kind=type_extrapolation, fill_value='extrapolate')
+            f = interp1d(x_var[last_fix_lower:], a[last_fix_lower:], kind=type_extrapolation, fill_value='extrapolate')
     else:
         if type_extrapolation=="spline":
-            f = CubicSpline(evl_grid[last_fix_lower:-last_fix_upper], a[last_fix_lower:-last_fix_upper],bc_type='natural') 
+            f = CubicSpline(x_var[last_fix_lower:-last_fix_upper], a[last_fix_lower:-last_fix_upper],bc_type='natural')
         else:
-            f = interp1d(evl_grid[last_fix_lower:-last_fix_upper], a[last_fix_lower:-last_fix_upper], kind=type_extrapolation, fill_value='extrapolate') 
-    return f(evl_grid)
+            f = interp1d(x_var[last_fix_lower:-last_fix_upper], a[last_fix_lower:-last_fix_upper], kind=type_extrapolation, fill_value='extrapolate')
+    return f(x_var)
 
 def monotonicity_check(a):
     diffs = a[1:]-a[:-1]
@@ -730,6 +735,9 @@ def gen_welfare_df(smoothed_inc_dict,smoothed_exp_dict,smoothed_df,
     return smoothed_df
     
 def identify_non_crossings(dataframe,p0_or_p1,amt_to_add=0.0001):
+    # Only assign censored values for goods passing the monotonicity filter
+    if dataframe['use_curves'] != 1:
+        return dataframe['logP0_ranked'] if p0_or_p1 == 'P0' else dataframe['logP1_ranked']
     if p0_or_p1 == 'P0':
         if (dataframe['curve_mon1'] == 1 and np.isposinf(dataframe['yh1'])):
             return dataframe['maxlogP0']+amt_to_add
