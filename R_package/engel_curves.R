@@ -326,8 +326,14 @@ monotonicity_tails_original <- function(a, evl_grid, evl_points, prcntl,
 }
 
 # ── Monotonicity check ──────────────────────────────────────────────────────
-monotonicity_check <- function(a) {
-  diffs <- a[2:length(a)] - a[1:(length(a) - 1)]
+monotonicity_check <- function(a, prcntl = 0.05) {
+  if (prcntl > 0) {
+    lo    <- round(length(a) * prcntl) + 1L
+    hi    <- round(length(a) * (1 - prcntl))
+    diffs <- a[(lo + 1L):hi] - a[lo:(hi - 1L)]
+  } else {
+    diffs <- a[2:length(a)] - a[1:(length(a) - 1)]
+  }
   diffs <- diffs[!is.na(diffs)]
   if (length(diffs) == 0) return(NA_real_)
   if (min(diffs) > 0) return(1)
@@ -539,9 +545,11 @@ apply_first_order_price_correction <- function(smoothed_exp, smoothed_inc, d_pri
     dp_bar <- if (!is.null(dp_avg[[mg_grp_key]])) dp_avg[[mg_grp_key]] else 0
 
     # Bias for P0: uses period-0 slopes and +dp direction
+    # slope * w converts d(log y)/dw to d(log y)/d(log w) = (beta^0)^{-1}
     key0 <- paste0(mkt, "_", period_0, "_", gd)
     if (!is.null(slopes[[key0]])) {
-      bias0_dict[[mg_key]] <- slopes[[key0]] * sigma * (dp - dp_bar)
+      w0 <- smoothed_exp[[key0]]
+      bias0_dict[[mg_key]] <- slopes[[key0]] * w0 * sigma * (dp - dp_bar)
     } else if (!is.null(smoothed_exp[[key0]])) {
       bias0_dict[[mg_key]] <- rep(NA_real_, length(smoothed_exp[[key0]]))
     }
@@ -549,7 +557,8 @@ apply_first_order_price_correction <- function(smoothed_exp, smoothed_inc, d_pri
     # Bias for P1: uses period-1 slopes and -dp direction
     key1 <- paste0(mkt, "_", period_1, "_", gd)
     if (!is.null(slopes[[key1]])) {
-      bias1_dict[[mg_key]] <- slopes[[key1]] * sigma * (-dp - (-dp_bar))
+      w1 <- smoothed_exp[[key1]]
+      bias1_dict[[mg_key]] <- slopes[[key1]] * w1 * sigma * (-dp - (-dp_bar))
     } else if (!is.null(smoothed_exp[[key1]])) {
       bias1_dict[[mg_key]] <- rep(NA_real_, length(smoothed_exp[[key1]]))
     }

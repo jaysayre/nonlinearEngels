@@ -277,8 +277,15 @@ def _monotonicity_tails_original(a, evl_grid, evl_points, prcntl, extrapolate_en
             f = interp1d(x_var[last_fix_lower:-last_fix_upper], a[last_fix_lower:-last_fix_upper], kind=type_extrapolation, fill_value='extrapolate')
     return f(x_var)
 
-def monotonicity_check(a):
-    diffs = a[1:]-a[:-1]
+def monotonicity_check(a, prcntl=0.05):
+    if prcntl > 0:
+        lo    =  int(np.round(len(a) * prcntl))
+        hi    =  int(np.round(len(a) * (1 - prcntl)))
+        diffs =  a[lo:hi][1:] - a[lo:hi][:-1]
+    else:
+        diffs =  a[1:] - a[:-1]
+    if len(diffs) == 0:
+        return None
     ### Positive engel curve
     if min(diffs) > 0:
         return 1
@@ -387,9 +394,9 @@ def apply_first_order_price_correction(
     Computes per-good bias corrections for P0 and P1 price indices:
         bias = (beta^0)^{-1} * sigma * (d_ln_p - d_ln_p_bar_G)
 
-    where (beta^0)^{-1} = d(log y)/d(w) is the slope of the inverse Engel
-    curve, and d_ln_p_bar_G is the simple equal-weighted average price change
-    within group G.
+    where (beta^0)^{-1} = d(log y)/d(log w) = [d(log y)/d(w)] * w is the
+    inverse income elasticity of the relative Engel curve, and d_ln_p_bar_G
+    is the simple equal-weighted average price change within group G.
 
     Returns (bias0_dict, bias1_dict) where each is keyed by (mkt, gd) → array
     of bias values at each percentile.
@@ -500,9 +507,11 @@ def apply_first_order_price_correction(
         dp_bar  = dp_avg.get((mkt, grp), 0.0)
 
         # Bias for P0: uses period-0 slopes and +dp direction
+        # slope * w converts d(log y)/dw to d(log y)/d(log w) = (beta^0)^{-1}
         key0 = (mkt, period_0, gd)
         if key0 in slopes:
-            bias0_dict[(mkt, gd)] = slopes[key0] * sigma * (dp - dp_bar)
+            w0 = smoothed_exp[key0]
+            bias0_dict[(mkt, gd)] = slopes[key0] * w0 * sigma * (dp - dp_bar)
         else:
             n_pts = len(smoothed_exp.get(key0, []))
             if n_pts > 0:
@@ -511,7 +520,8 @@ def apply_first_order_price_correction(
         # Bias for P1: uses period-1 slopes and -dp direction
         key1 = (mkt, period_1, gd)
         if key1 in slopes:
-            bias1_dict[(mkt, gd)] = slopes[key1] * sigma * -(dp - dp_bar)
+            w1 = smoothed_exp[key1]
+            bias1_dict[(mkt, gd)] = slopes[key1] * w1 * sigma * -(dp - dp_bar)
         else:
             n_pts = len(smoothed_exp.get(key1, []))
             if n_pts > 0:

@@ -2,11 +2,16 @@ local exp_share_input_var = "`1'"
 local mkt_good_group_var = "`2'"
 local should_script_fix_neg_share = "`3'"
 local should_script_fix_above1_share = "`4'"
+local tails_prcntl = "`5'"
+if "`tails_prcntl'" == "" {
+	local tails_prcntl = 0.05
+}
 
 capture program drop monotonicity_id
 program monotonicity_id
 	*** Check if Engel curve monotonic (pos/neg) + fix estimated negative shares with monotonic linear approx.
-	args exp_share_var group_var fix_neg fix_ab_1
+	*** Only checks interior (prcntile >= prcntl & prcntile <= 1-prcntl) to match monotonicity_tails extrapolation range
+	args exp_share_var group_var fix_neg fix_ab_1 tails_prcntl
 	confirm variable `exp_share_var'
 	confirm variable `group_var'
 
@@ -70,8 +75,11 @@ program monotonicity_id
 	}
 
 	*** Compute difference between each obsveration (make sure dataset sorted by good id+percentile)
+	*** Only check interior range (prcntile >= tails_prcntl & prcntile <= 1-tails_prcntl) to match monotonicity_tails
+	local upper_prcntl = 1 - `tails_prcntl'
 	qui gen diff = `exp_share_var'-`exp_share_var'[_n-1]
 	qui replace diff = . if `group_var' != `group_var'[_n-1]
+	qui replace diff = . if (prcntile < `tails_prcntl') | (prcntile > `upper_prcntl')
 
 	qui egen min_share = min(`exp_share_var'), by(`group_var')
 	qui egen max_diff = max(diff), by(`group_var')
@@ -84,4 +92,4 @@ program monotonicity_id
 	drop max_diff min_diff min_share diff
 end
 
-monotonicity_id `exp_share_input_var' `mkt_good_group_var' `should_script_fix_neg_share' `should_script_fix_above1_share'
+monotonicity_id `exp_share_input_var' `mkt_good_group_var' `should_script_fix_neg_share' `should_script_fix_above1_share' `tails_prcntl'

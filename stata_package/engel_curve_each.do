@@ -7,7 +7,6 @@ local market_id = "`3'"
 local period_id = "`4'"
 local group_id = "`5'"
 
-
 capture program drop engel_curve_mpg
 program engel_curve_mpg
 	args mpg weights market_id period_id group_id out_fl

@@ -162,11 +162,12 @@ else {
 
 sort mkt_good_prd prcntile
 *** Last arg is whether we want to eliminate negative consumption shares in tails of monotonic Engel curves with a linear interpolation to zero ("Y" does this)
+*** 5th arg is the tails percentage for interior-only monotonicity check (matches monotonicity_tails extrapolation range)
 if "`paralleize'" == "Y" {
-	qui parallel, by(mkt_good_prd): do "`monotonicity_check'"  "smoothed_exp_share_g" "mkt_good_prd" "`elim_neg_shares'" "`elim_ab1_shares'"
+	qui parallel, by(mkt_good_prd): do "`monotonicity_check'"  "smoothed_exp_share_g" "mkt_good_prd" "`elim_neg_shares'" "`elim_ab1_shares'" `tails_extrapolation_percentage'
 }
 else {
-	do "`monotonicity_check'"  "smoothed_exp_share_g" "mkt_good_prd" "`elim_neg_shares'" "`elim_ab1_shares'"
+	do "`monotonicity_check'"  "smoothed_exp_share_g" "mkt_good_prd" "`elim_neg_shares'" "`elim_ab1_shares'" `tails_extrapolation_percentage'
 }
 
 
@@ -211,8 +212,8 @@ if "`first_order_price_corr'" == "Y" {
 	gen P_av_all = sum_d_ln_p / count_goods_r
 
 	*** AFFG Equation 8: bias = (beta^0)^{-1} * sigma * (d_ln_p - d_ln_p_bar)
-	*** smooth_slope = d(log_y)/d(w) = (beta)^{-1}
-	gen bias_bygood_full = smooth_slope * `sigma' * (d_ln_p - P_av_all)
+	*** smooth_slope = d(log_y)/d(w); multiply by w to get d(log_y)/d(log_w) = (beta)^{-1}
+	gen bias_bygood_full = smooth_slope * smoothed_exp_share_g * `sigma' * (d_ln_p - P_av_all)
 	keep bias_bygood_full `market_id' `group_id' `good_id' `period_id' prcntile
 	
 	qui reshape wide bias_bygood_full*, i(`market_id' `good_id' `group_id' prcntile) j(`period_id')
