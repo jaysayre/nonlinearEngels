@@ -76,21 +76,22 @@ end
 
 # ── Weighted average handling NaNs ───────────────────────────────────────────
 function nan_wght_average(A::AbstractVector, weights::AbstractVector)
-    if all(isnan, A)
+    valid   =  [!ismissing(a) && !isnan(a) for a in A]
+    if !any(valid)
         return NaN
     end
-    valid   =  .!isnan.(A)
-    num     =  sum(A[valid] .* weights[valid])
-    denom   =  sum(weights[valid])
+    num     =  sum(Float64.(A[valid]) .* Float64.(weights[valid]))
+    denom   =  sum(Float64.(weights[valid]))
     return num / denom
 end
 
 # ── Create identifier column ─────────────────────────────────────────────────
 function create_identifier(df::DataFrame, columns_list::Vector{String},
                            id_name::String; return_id_df::Bool = false)
-    id_df        =  unique(df[:, columns_list])
+    id_df        =  unique(dropmissing(df[:, columns_list]))
     id_df[!, id_name] = 1:nrow(id_df)
-    result       =  leftjoin(df, id_df, on = columns_list)
+    result       =  leftjoin(df, id_df, on = columns_list,
+                             matchmissing = :notequal)
     if return_id_df
         return result, id_df
     else
@@ -430,8 +431,9 @@ function monotonicity_check(a::AbstractVector; prcntl::Float64 = 0.05)
     else
         diffs =  a[2:end] .- a[1:end-1]
     end
-    diffs = filter(!isnan, diffs)
     isempty(diffs) && return nothing
+    # Match Python: NaN in diffs causes min/max to be NaN, failing both checks
+    any(isnan, diffs) && return nothing
     minimum(diffs) > 0 && return 1
     maximum(diffs) < 0 && return -1
     return nothing
@@ -468,19 +470,28 @@ end
 # ── Exact price correction (AFFG Proposition 1) ─────────────────────────────
 function apply_exact_price_correction(smoothed_exp::Dict, d_price_dict::Dict,
                                        group_dict::Dict, sigma::Float64,
-                                       period_to_adjust, period_0, period_1)
+                                       period_to_adjust, period_0, period_1;
+                                       first_order_taylor::Bool = false)
     adjusted = Dict(k => copy(v) for (k, v) in smoothed_exp)
 
-    # Apply exponential adjustment to the specified period only
+    # Apply adjustment to the specified period only
     for (key, val) in adjusted
         mkt, prd, gd = key
         prd != period_to_adjust && continue
         !haskey(d_price_dict, (mkt, gd)) && continue
         dp = d_price_dict[(mkt, gd)]
-        if prd == period_0
-            adjusted[key] = val .* exp.(-(sigma - 1) * dp)
-        elseif prd == period_1
-            adjusted[key] = val .* exp.((sigma - 1) * dp)
+        if first_order_taylor
+            if prd == period_0
+                adjusted[key] = val .* (1 .- (sigma - 1) .* dp)
+            elseif prd == period_1
+                adjusted[key] = val .* (1 .+ (sigma - 1) .* dp)
+            end
+        else
+            if prd == period_0
+                adjusted[key] = val .* exp.(-(sigma - 1) * dp)
+            elseif prd == period_1
+                adjusted[key] = val .* exp.((sigma - 1) * dp)
+            end
         end
     end
 
@@ -656,6 +667,17 @@ function dict_to_df(input_dict::Dict, column_list::Vector{String},
         push!(rows, row)
     end
 
+    if isempty(rows)
+        # Return empty DataFrame with correct columns
+        df = DataFrame()
+        for col in column_list
+            df[!, col] = Any[]
+        end
+        df[!, "percentile"] = Int[]
+        df[!, new_col_name] = Float64[]
+        return df
+    end
+
     wide_df = DataFrame(rows)
 
     # Pivot to long
@@ -792,16 +814,25 @@ end
 # ── Linear interpolation (no extrapolation — returns NaN outside range) ──────
 function _interp1d(x_knots::AbstractVector, y_knots::AbstractVector,
                    x_eval::AbstractVector)
+    # Sort x_knots ascending (Engel curves can be monotonically decreasing)
+    if length(x_knots) > 1 && x_knots[1] > x_knots[end]
+        perm = sortperm(x_knots)
+        xk   = x_knots[perm]
+        yk   = y_knots[perm]
+    else
+        xk = x_knots
+        yk = y_knots
+    end
     result = fill(NaN, length(x_eval))
     for (i, x) in enumerate(x_eval)
-        if x < x_knots[1] || x > x_knots[end]
+        if x < xk[1] || x > xk[end]
             result[i] = NaN
             continue
         end
-        j = searchsortedlast(x_knots, x)
-        j = clamp(j, 1, length(x_knots) - 1)
-        t = (x - x_knots[j]) / (x_knots[j+1] - x_knots[j])
-        result[i] = y_knots[j] + t * (y_knots[j+1] - y_knots[j])
+        j = searchsortedlast(xk, x)
+        j = clamp(j, 1, length(xk) - 1)
+        t = (x - xk[j]) / (xk[j+1] - xk[j])
+        result[i] = yk[j] + t * (yk[j+1] - yk[j])
     end
     return result
 end
@@ -820,10 +851,14 @@ function gen_welfare_df(smoothed_inc_dict::Dict, smoothed_exp_dict::Dict,
                         filter_to_deciles::Bool = false)
 
     # Pivot smoothed_df wider on period
+    # Detect actual period values in the DataFrame (handles both 0/1 and original IDs)
     sm_sub = unique(smoothed_df[:, [market_id, good_id, group_id, period_id,
                                     "num_households_mkt", "wt_mkt_prd"]])
-    sm_p0  = sm_sub[sm_sub[!, period_id] .== 0, :]
-    sm_p1  = sm_sub[sm_sub[!, period_id] .== 1, :]
+    prd_vals = sort(unique(sm_sub[!, period_id]))
+    sm_prd_0 = prd_vals[1]  # smaller period value
+    sm_prd_1 = prd_vals[2]  # larger period value
+    sm_p0  = sm_sub[sm_sub[!, period_id] .== sm_prd_0, :]
+    sm_p1  = sm_sub[sm_sub[!, period_id] .== sm_prd_1, :]
     rename!(sm_p0, "num_households_mkt" => "num_households_mkt0",
                    "wt_mkt_prd" => "wt_mkt_prd0")
     rename!(sm_p1, "num_households_mkt" => "num_households_mkt1",
@@ -896,7 +931,8 @@ function gen_welfare_df(smoothed_inc_dict::Dict, smoothed_exp_dict::Dict,
     result = leftjoin(exp_wide, inc_wide, on = [market_id, "percentile"])
     result = leftjoin(result, yh_df, on = [market_id, good_id, "percentile"])
     result = leftjoin(result, smoothed_wide, on = [market_id, good_id])
-    result = leftjoin(result, num_goods_df, on = [market_id, group_id])
+    result = leftjoin(result, num_goods_df, on = [market_id, group_id],
+                      matchmissing = :notequal)
 
     # Fill missing monotonicity/use_curves with 0
     for col in ["curve_mon0", "curve_mon1", "use_curves"]
